@@ -1254,8 +1254,6 @@ def main():
 
     with st.sidebar:
         st.header("⚙️ Configuration")
-        st.info(f"**Model:** {MISTRAL_MODEL}")
-        st.info(f"**API Keys Found:** {len(MISTRAL_API_KEYS)}")
         st.session_state.batch_size = st.slider(
             "Concurrency",
             1, 20, 8,
