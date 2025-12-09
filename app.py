@@ -97,12 +97,13 @@ def get_or_create_worksheet(client, sheet_name, subsheet_name):
             logger.info(f"Created new worksheet: '{subsheet_name}' in '{sheet_name}'.")
         return worksheet
     except gspread.SpreadsheetNotFound:
-        logger.error(f"Spreadsheet '{sheet_name}' not found. Please create it and share it with the service account.")
-        st.error(f"Spreadsheet '{sheet_name}' not found. Please create it and share it with the service account email.")
+        logger.error(f"Spreadsheet '{sheet_name}' not found.")
+        st.warning(f"⚠️ Spreadsheet '{sheet_name}' not found. Results will strictly be available via CSV download.")
         return None
     except Exception as e:
-        logger.error(f"An error occurred accessing the worksheet: {e}")
-        st.error(f"An error occurred while accessing the spreadsheet: {e}")
+        # CATCH NETWORK ERRORS HERE
+        logger.error(f"Google Sheets Network Error: {e}")
+        st.warning("⚠️ Could not connect to Google Sheets (Network/DNS Error). Saving to Sheet is disabled, but analysis will continue. Please download the CSV result.")
         return None
 
 # ##############################################################################
@@ -455,6 +456,9 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
     if not api_key:
         return json.dumps({"error": "Missing Mistral API key for this request."})
 
+    # Create a masked identifier for the key (e.g., "...a1b2")
+    key_id = f"...{api_key[-4:]}" if len(api_key) > 4 else "ShortKey"
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -492,31 +496,42 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
                     .get("content", "")
                 )
                 return content.strip()
-            elif resp.status_code in (429, 500, 502, 503, 504):
+            
+            elif resp.status_code == 429:
+                # SPECIFIC LOGGING FOR RATE LIMIT WITH KEY ID
                 wait_s = (initial_backoff * (2 ** attempt)) + uniform(0, 1)
                 logger.warning(
-                    f"Mistral API returned {resp.status_code}. "
+                    f"⚠️ RATE LIMIT (429) on Key {key_id}. "
+                    f"Attempt {attempt + 1}/{attempts}. Pausing for {wait_s:.2f}s..."
+                )
+                time.sleep(wait_s)
+                continue
+                
+            elif resp.status_code in (500, 502, 503, 504):
+                wait_s = (initial_backoff * (2 ** attempt)) + uniform(0, 1)
+                logger.warning(
+                    f"Mistral Server Error {resp.status_code} on Key {key_id}. "
                     f"Attempt {attempt + 1}/{attempts}. Retrying in {wait_s:.2f}s..."
                 )
                 time.sleep(wait_s)
                 continue
             else:
-                logger.error(f"Mistral API Error: {resp.status_code} - {resp.text}")
+                logger.error(f"Mistral API Error on Key {key_id}: {resp.status_code} - {resp.text}")
                 error_payload = {"error": f"API Error Status {resp.status_code}: {resp.text}"}
                 return json.dumps(error_payload)
+                
         except requests.exceptions.RequestException as e:
             wait_s = (initial_backoff * (2 ** attempt)) + uniform(0, 1)
             logger.warning(
-                f"RequestException (attempt {attempt + 1}/{attempts}): {e}. "
+                f"RequestException on Key {key_id} (attempt {attempt + 1}/{attempts}): {e}. "
                 f"Retrying in {wait_s:.2f}s..."
             )
             time.sleep(wait_s)
             continue
     
-    logger.error("Mistral request failed after all retries due to persistent errors (likely rate limiting).")
-    final_error_payload = {"error": "API Rate Limit Exceeded. Failed after all retries. Please reduce concurrency or wait."}
+    logger.error(f"Mistral request failed on Key {key_id} after all retries due to persistent errors.")
+    final_error_payload = {"error": "API Rate Limit Exceeded. Failed after all retries."}
     return json.dumps(final_error_payload)
-
 # ==============================================================================
 #  HELPER & FORMATTING FUNCTIONS
 # ==============================================================================
@@ -723,9 +738,8 @@ def calculate_skill_probabilities(data):
 
 def process_resume_for_shortlisting(row, resume_index, user_requirements, company_name, api_key):
     """
-    Worker for shortlisting. It now performs two tasks in one AI call:
-    1. Evaluates the resume against user requirements to get probabilities and remarks.
-    2. Extracts and classifies all projects mentioned in the resume.
+    Worker for shortlisting. 
+    Now includes STRICT Python-based Keyword Validation to prevent "JavaScript" == "Java" confusion.
     """
     user_id = row['user_id']
     resume_link = row['Resume link']
@@ -735,6 +749,7 @@ def process_resume_for_shortlisting(row, resume_index, user_requirements, compan
         'Resume Link': resume_link,
         'Company Name': company_name,
         'Overall Probability': 0, 'Overall Remarks': "Error processing",
+        'Priority Band': "Not Shortlisted", # Default
         'Projects Probability': 0, 'Projects Remarks': "",
         'Skills Probability': 0, 'Skills Remarks': "",
         'Experience Probability': 0, 'Experience Remarks': "",
@@ -761,10 +776,32 @@ def process_resume_for_shortlisting(row, resume_index, user_requirements, compan
         elif file_type in ['png', 'jpeg']:
             resume_text, _ = extract_text_from_image(temp_file_path)
         else:
-            raise ValueError(f"Unsupported file type: The file is not a valid PDF or image.")
+            raise ValueError(f"Unsupported file type.")
 
         if not resume_text.strip():
             raise ValueError("Could not extract any text from the file.")
+
+        # ==============================================================================
+        #  CRITICAL FIX: PYTHON-BASED "JAVA vs JAVASCRIPT" VALIDATION
+        # ==============================================================================
+        
+        # 1. Clean text for checking
+        text_lower = resume_text.lower()
+        reqs_lower = user_requirements.lower()
+        
+        system_warning = ""
+
+        # 2. Check for Java specifically
+        if "java" in reqs_lower:
+            # Regex \bjava\b means "Java" must be surrounded by spaces or punctuation.
+            # It matches "Java," "Java." " Java "
+            # It DOES NOT match "JavaScript"
+            has_standalone_java = re.search(r'\bjava\b', text_lower)
+            
+            if not has_standalone_java:
+                system_warning += "\n\n[SYSTEM WARNING]: The user requires 'Java'. I have scanned the text and 'Java' appears to be MISSING as a standalone word. The text contains 'JavaScript', but THAT IS NOT JAVA. Treat 'Java' as MISSING."
+
+        # ==============================================================================
 
         project_instruction_block = ""
         if INTERNAL_PROJECTS_STRING:
@@ -779,11 +816,39 @@ Example Project Entry: {{ "title": "Jobby App", "techStack": ["React", "JS"], "c
 """
 
         prompt = f"""
-You are an intelligent technical resume evaluator performing two critical tasks in one go.
-First, evaluate the resume against the "Required Criteria" using your focused two-step method to generate probabilities and remarks.
-Second, extract all projects from the resume text and classify them as "Internal" or "External" based on the provided list.
+You are a Nuanced Technical Recruiter and Logic Engine.
+Your goal is to categorize the candidate into Priority Bands (P1, P2, P3) based on strict keyword matching.
 
-Return your answer as a **single, pure JSON object** containing both the evaluation and the extracted project data. Do not add any commentary.
+{system_warning}
+
+**CRITICAL ANTI-HALLUCINATION RULES:**
+1. **JAVA IS NOT JAVASCRIPT.** 
+   - If the resume contains "JavaScript", "ECMAScript", or "React.js", DO NOT count this as "Java".
+   - "Java" is a standalone backend language. "JavaScript" is a frontend language.
+   - If the candidate lists "JavaScript Essentials" certification, that is **NOT** Java.
+   - If the resume text does not explicitly say "Java" as a separate word, count it as MISSING.
+
+**SCORING GUIDELINES (STRICTLY FOLLOW THIS):**
+
+**BAND P1 (Score 90 - 100): THE PERFECT MATCH**
+- The candidate has **ALL** the specific technologies listed in the Required Criteria.
+- Example: If user asks for "Java, Springboot, React", the resume MUST have ALL THREE to get > 90.
+- If even ONE core skill (especially Java) is missing, DO NOT give a score above 90.
+
+**BAND P2 (Score 75 - 89): THE STRONG CONTENDER (Missing 1-2 Skills)**
+- The candidate matches **MOST** of the criteria but is missing a specific technology.
+- Example: User asks for "Java, Springboot, React". Candidate has "React and Node" but NO "Java".
+- **Action:** This is still a good profile. Do NOT give 0. Give a score between 75 and 89.
+- **Remarks:** You must explicitly state: "Candidate fits P2. Good frontend skills, but missing required Java."
+
+**BAND P3 (Score 60 - 74): THE PARTIAL MATCH**
+- The candidate has relevant skills but is missing **MAJOR** parts of the stack.
+- Example: User asks for "Full Stack Java". Candidate only knows "HTML and CSS".
+
+**BAND F (Score 0 - 59): NO MATCH**
+- The resume is completely unrelated to the job description.
+
+Return your answer as a **single, pure JSON object**.
 
 **REQUIRED JSON STRUCTURE:**
 {{
@@ -799,18 +864,6 @@ Return your answer as a **single, pure JSON object** containing both the evaluat
   "overall_remarks": "string",
   {project_instruction_block}
 }}
-
-**EVALUATION INSTRUCTIONS (TWO-STEP PROCESS):**
-**STEP 1: ANALYZE INTENT**
-Analyze the "Required Criteria" to determine if the primary focus is on CERTIFICATION/EDUCATION, EXPERIENCE, SKILLS, or if it's HOLISTIC.
-
-**STEP 2: FOCUSED EVALUATION**
-- If intent is CERTIFICATION/EDUCATION, the "Overall Probability" must be primarily based on finding the specific item. A direct match should result in an "Overall Probability" of 90+.
-- If intent is EXPERIENCE, "Overall Probability" is based on work history relevance.
-- If intent is SKILLS, "Overall Probability" is a balanced score of where skills are mentioned.
-- If intent is HOLISTIC, use a weighted average for "Overall Probability": Projects (40%), Skills (30%), Experience (20%), Other (10%).
-
-Your final "Overall Probability" and "Overall Remarks" must strictly follow this focused logic.
 
 ---
 **Required Criteria:**
@@ -856,7 +909,6 @@ Your final "Overall Probability" and "Overall Remarks" must strictly follow this
         result['Internal Projects Count'] = internal_count
         result['External Projects Count'] = external_count
         result['Total Projects Count'] = internal_count + external_count
-
 
     except Exception as e:
         logger.error(f"Failed shortlisting {user_id} ({resume_link}): {e}")
