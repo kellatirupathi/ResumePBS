@@ -791,15 +791,17 @@ def process_resume_for_shortlisting(row, resume_index, user_requirements, compan
         
         system_warning = ""
 
-        # 2. Check for Java specifically
-        if "java" in reqs_lower:
+        # 2. Check for Java specifically using REGEX (Word Boundaries)
+        # OLD BUGGY WAY: if "java" in reqs_lower: (This triggered on "JavaScript")
+        # NEW CORRECT WAY: Checks for "Java" only if it is a whole word.
+        if re.search(r'\bjava\b', reqs_lower):
             # Regex \bjava\b means "Java" must be surrounded by spaces or punctuation.
             # It matches "Java," "Java." " Java "
             # It DOES NOT match "JavaScript"
             has_standalone_java = re.search(r'\bjava\b', text_lower)
             
             if not has_standalone_java:
-                system_warning += "\n\n[SYSTEM WARNING]: The user requires 'Java'. I have scanned the text and 'Java' appears to be MISSING as a standalone word. The text contains 'JavaScript', but THAT IS NOT JAVA. Treat 'Java' as MISSING."
+                system_warning += "\n\n[SYSTEM WARNING]: The user explicitly requires 'Java' (the backend language). I have scanned the text and 'Java' appears to be MISSING as a standalone word. The text might contain 'JavaScript', but THAT IS NOT JAVA. Treat 'Java' as MISSING."
 
         # ==============================================================================
 
