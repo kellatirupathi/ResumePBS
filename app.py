@@ -32,21 +32,36 @@ from oauth2client.service_account import ServiceAccountCredentials
 #  CONFIGURATION
 # ==============================================================================
 
-# NEW: Read THREE API keys for parallel processing.
-try:
-    MISTRAL_API_KEY_1 = st.secrets.get("MISTRAL_API_KEY_1", os.getenv("MISTRAL_API_KEY_1"))
-    MISTRAL_API_KEY_2 = st.secrets.get("MISTRAL_API_KEY_2", os.getenv("MISTRAL_API_KEY_2"))
-    MISTRAL_API_KEY_3 = st.secrets.get("MISTRAL_API_KEY_3", os.getenv("MISTRAL_API_KEY_3"))
-    # Create a list of available keys, filtering out any that are None or empty.
-    MISTRAL_API_KEYS = [key for key in [MISTRAL_API_KEY_1, MISTRAL_API_KEY_2, MISTRAL_API_KEY_3] if key]
-except (AttributeError, KeyError):
-    MISTRAL_API_KEY_1 = os.getenv("MISTRAL_API_KEY_1")
-    MISTRAL_API_KEY_2 = os.getenv("MISTRAL_API_KEY_2")
-    MISTRAL_API_KEY_3 = os.getenv("MISTRAL_API_KEY_3")
-    MISTRAL_API_KEYS = [key for key in [MISTRAL_API_KEY_1, MISTRAL_API_KEY_2, MISTRAL_API_KEY_3] if key]
+def get_secret_or_env(key_name: str) -> str:
+    """Read key from Streamlit secrets first, then environment."""
+    try:
+        secret_value = st.secrets.get(key_name)
+    except (AttributeError, KeyError):
+        secret_value = None
+    return secret_value or os.getenv(key_name) or ""
 
-MISTRAL_MODEL = "mistral-large-latest"
+
+# Dynamically read up to 12 Mistral API keys
+MISTRAL_API_KEYS = []
+for i in range(1, 13):
+    key_name = f"MISTRAL_API_KEY_{i}"
+    key = get_secret_or_env(key_name)
+    if key:
+        MISTRAL_API_KEYS.append(key)
+
+# If no numbered keys found, try a single unnumbered key
+if not MISTRAL_API_KEYS:
+    single_key = get_secret_or_env("MISTRAL_API_KEY")
+    if single_key:
+        MISTRAL_API_KEYS.append(single_key)
+
+# OpenAI uses a single key for this app
+OPENAI_API_KEY = get_secret_or_env("OPENAI_API_KEY")
+
+MISTRAL_MODEL = "mistral-medium-latest"
 MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
+OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
 
 # Configure logging
@@ -62,7 +77,6 @@ logger = logging.getLogger(__name__)
 #  GOOGLE SHEETS CONFIGURATION
 # ##############################################################################
 
-# Replace with the name of the Google Sheet you created and shared.
 GSHEET_NAME = "AI Resume Analysis Results"
 
 @st.cache_resource
@@ -73,15 +87,19 @@ def get_gspread_client():
             'https://spreadsheets.google.com/feeds',
             'https://www.googleapis.com/auth/drive'
         ]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            st.secrets["gcp_service_account"], scope
-        )
-        client = gspread.authorize(creds)
-        logger.info("Successfully authorized with Google Sheets API.")
-        return client
+        if "gcp_service_account" in st.secrets:
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(
+                st.secrets["gcp_service_account"], scope
+            )
+            client = gspread.authorize(creds)
+            logger.info("Successfully authorized with Google Sheets API.")
+            return client
+        else:
+            logger.warning("No Google Cloud credentials found in secrets.")
+            return None
     except Exception as e:
         logger.error(f"Failed to connect to Google Sheets: {e}")
-        st.error(f"Failed to connect to Google Sheets. Check your secrets and sharing permissions. Error: {e}")
+        st.error(f"Failed to connect to Google Sheets. Check your secrets. Error: {e}")
         return None
 
 def get_or_create_worksheet(client, sheet_name, subsheet_name):
@@ -101,9 +119,8 @@ def get_or_create_worksheet(client, sheet_name, subsheet_name):
         st.warning(f"⚠️ Spreadsheet '{sheet_name}' not found. Results will strictly be available via CSV download.")
         return None
     except Exception as e:
-        # CATCH NETWORK ERRORS HERE
         logger.error(f"Google Sheets Network Error: {e}")
-        st.warning("⚠️ Could not connect to Google Sheets (Network/DNS Error). Saving to Sheet is disabled, but analysis will continue. Please download the CSV result.")
+        st.warning("⚠️ Could not connect to Google Sheets (Network/DNS Error). Saving to Sheet is disabled.")
         return None
 
 # ##############################################################################
@@ -145,7 +162,6 @@ def get_internal_projects_as_string(file_path: str) -> str:
         logger.error(f"Error reading {file_path}: {e}. All projects will be treated as 'External'.")
         return ""
 
-# Get the project list once at the start.
 INTERNAL_PROJECTS_STRING = get_internal_projects_as_string(INTERNAL_PROJECT_LIST_FILE)
 # ##############################################################################
 
@@ -161,6 +177,12 @@ if 'last_analysis_mode' not in st.session_state:
     st.session_state.last_analysis_mode = ""
 if 'shortlisting_mode' not in st.session_state:
     st.session_state.shortlisting_mode = "Probability Wise (Default)"
+if 'api_provider' not in st.session_state:
+    st.session_state.api_provider = "OpenAI"
+if 'provider_for_batch_size' not in st.session_state:
+    st.session_state.provider_for_batch_size = "OpenAI"
+if 'batch_size' not in st.session_state:
+    st.session_state.batch_size = 1
 
 
 # ==============================================================================
@@ -190,8 +212,7 @@ def sanitize_json_text(text: str) -> str:
     1. Removing markdown fences and any surrounding conversational text.
     2. Isolating the core JSON object or array.
     3. Removing control characters and escaping invalid backslashes.
-    4. Attempting to fix truncation errors by closing unterminated strings
-       and balancing both curly braces and square brackets.
+    4. Attempting to fix truncation errors.
     """
     if not isinstance(text, str):
         text = str(text)
@@ -209,7 +230,7 @@ def sanitize_json_text(text: str) -> str:
         start_pos = min(first_brace, first_bracket)
     elif first_brace != -1:
         start_pos = first_brace
-    else: # first_bracket != -1
+    else: 
         start_pos = first_bracket
 
     last_brace = text.rfind('}')
@@ -271,9 +292,7 @@ def is_present_str(s: Any) -> bool:
 
 def download_and_identify_file(file_url: str, output_path: str) -> Tuple[bool, str, str]:
     """
-    Downloads a file from a URL, saves it, and identifies its type by reading its header.
-    Returns (success, message_or_path, file_type).
-    file_type can be 'pdf', 'png', 'jpeg', or 'unsupported'.
+    Downloads a file from a URL, saves it, and identifies its type.
     """
     try:
         parsed_url = urlparse(file_url)
@@ -299,20 +318,28 @@ def download_and_identify_file(file_url: str, output_path: str) -> Tuple[bool, s
 
         elif is_google_drive:
             file_id = None
-            if "id=" in parsed_url.query: file_id = parsed_url.query.split("id=")[1].split("&")[0]
-            elif "/d/" in parsed_url.path: file_id = parsed_url.path.split("/d/")[1].split('/')[0]
-            if not file_id: raise ValueError("Could not extract file ID from Google Drive URL")
+            if "id=" in parsed_url.query:
+                file_id = parsed_url.query.split("id=")[1].split("&")[0]
+            elif "/d/" in parsed_url.path:
+                file_id = parsed_url.path.split("/d/")[1].split('/')[0]
+            
+            if not file_id:
+                raise ValueError("Could not extract file ID from Google Drive URL")
 
             export_url = f"https://docs.google.com/document/d/{file_id}/export?format=pdf"
             try:
                 response = requests.get(export_url, stream=True, timeout=REQUEST_TIMEOUT, headers=headers)
                 response.raise_for_status()
                 with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                # Verify PDF header
                 with open(output_path, 'rb') as f_check:
                     if not f_check.read(5).startswith(b'%PDF'):
                         raise ValueError("On-the-fly conversion did not result in a valid PDF.")
                 logger.info("Successfully converted/downloaded file as PDF from Google Drive.")
+            
             except (requests.exceptions.RequestException, ValueError) as e:
                 logger.warning(f"On-the-fly GDrive conversion failed ({e}). Falling back to direct download...")
                 session = requests.Session()
@@ -321,18 +348,24 @@ def download_and_identify_file(file_url: str, output_path: str) -> Tuple[bool, s
                 response = session.get(URL, params={'id': file_id}, stream=True, timeout=REQUEST_TIMEOUT)
                 token = None
                 for key, value in response.cookies.items():
-                    if key.startswith('download_warning'): token = value; break
+                    if key.startswith('download_warning'):
+                        token = value
+                        break
                 if token:
                     params = {'id': file_id, 'confirm': token}
                     response = session.get(URL, params=params, stream=True, timeout=REQUEST_TIMEOUT)
+                
                 response.raise_for_status()
                 with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+        
         else: # Standard URL download
             response = requests.get(file_url, headers=headers, stream=True, timeout=REQUEST_TIMEOUT, allow_redirects=True)
             response.raise_for_status()
             with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
 
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             raise ValueError("Downloaded file is empty or does not exist.")
@@ -340,13 +373,13 @@ def download_and_identify_file(file_url: str, output_path: str) -> Tuple[bool, s
         file_type = 'unsupported'
         with open(output_path, 'rb') as f:
             header = f.read(8)
-            if header.startswith(b'%PDF'): file_type = 'pdf'
-            elif header.startswith(b'\x89PNG\r\n\x1a\n'): file_type = 'png'
-            elif header.startswith(b'\xff\xd8\xff'): file_type = 'jpeg'
+            if header.startswith(b'%PDF'):
+                file_type = 'pdf'
+            elif header.startswith(b'\x89PNG\r\n\x1a\n'):
+                file_type = 'png'
+            elif header.startswith(b'\xff\xd8\xff'):
+                file_type = 'jpeg'
         
-        if file_type == 'unsupported':
-             logger.warning(f"Downloaded file from {file_url} is not a recognized type (PDF, PNG, JPEG). Header: {header}")
-
         logger.info(f"File downloaded successfully to {output_path} and identified as type: {file_type}")
         return True, output_path, file_type
 
@@ -382,7 +415,6 @@ def extract_text_and_urls_from_pdf(pdf_path: str) -> Tuple[str, List[str]]:
     """
     Extracts text from a PDF using a robust fallback strategy (pdfplumber -> fitz -> OCR)
     and also extracts embedded hyperlinks.
-    Returns (extracted_text, extracted_urls).
     """
     text_content = ""
     extracted_urls = []
@@ -428,7 +460,6 @@ def extract_text_and_urls_from_pdf(pdf_path: str) -> Tuple[str, List[str]]:
 def extract_text_from_image(image_path: str) -> Tuple[str, List[str]]:
     """
     Extracts text from an image file (PNG, JPEG, etc.) using OCR.
-    Returns (extracted_text, empty_list_for_urls).
     """
     try:
         if not st.session_state.get('enable_ocr', True):
@@ -445,18 +476,18 @@ def extract_text_from_image(image_path: str) -> Tuple[str, List[str]]:
         return f"Error during image processing: {e}", []
 
 # ==============================================================================
-#  CORE AI & API FUNCTIONS (Mistral)
+#  CORE AI & API FUNCTIONS
 # ==============================================================================
 
 def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
     """
-    Calls Mistral La Plateforme chat completions API with the given prompt and a specific API key.
-    Includes retry with PROPER exponential backoff on 429 and timeouts.
+    Calls Mistral La Plateforme chat completions API.
+    Includes JITTER and INCREASED BACKOFF to prevent 429 Rate Limits.
     """
     if not api_key:
         return json.dumps({"error": "Missing Mistral API key for this request."})
 
-    # Create a masked identifier for the key (e.g., "...a1b2")
+    # Create a masked identifier for the key
     key_id = f"...{api_key[-4:]}" if len(api_key) > 4 else "ShortKey"
 
     headers = {
@@ -482,10 +513,14 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
     }
 
     attempts = 5
-    initial_backoff = 2.0 
+    # INCREASED BACKOFF: Start with 5 seconds wait, not 2
+    initial_backoff = 5.0 
 
     for attempt in range(attempts):
         try:
+            # 1. ADD JITTER: Random sleep to desynchronize threads
+            time.sleep(uniform(0.5, 2.5))
+
             resp = requests.post(MISTRAL_ENDPOINT, headers=headers, json=payload, timeout=120)
 
             if resp.status_code == 200:
@@ -498,8 +533,8 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
                 return content.strip()
             
             elif resp.status_code == 429:
-                # SPECIFIC LOGGING FOR RATE LIMIT WITH KEY ID
-                wait_s = (initial_backoff * (2 ** attempt)) + uniform(0, 1)
+                # 2. RATE LIMIT HANDLING: Wait longer exponentially
+                wait_s = (initial_backoff * (2 ** attempt)) + uniform(1, 3)
                 logger.warning(
                     f"⚠️ RATE LIMIT (429) on Key {key_id}. "
                     f"Attempt {attempt + 1}/{attempts}. Pausing for {wait_s:.2f}s..."
@@ -508,7 +543,7 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
                 continue
                 
             elif resp.status_code in (500, 502, 503, 504):
-                wait_s = (initial_backoff * (2 ** attempt)) + uniform(0, 1)
+                wait_s = (initial_backoff * (2 ** attempt)) + uniform(1, 3)
                 logger.warning(
                     f"Mistral Server Error {resp.status_code} on Key {key_id}. "
                     f"Attempt {attempt + 1}/{attempts}. Retrying in {wait_s:.2f}s..."
@@ -521,7 +556,7 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
                 return json.dumps(error_payload)
                 
         except requests.exceptions.RequestException as e:
-            wait_s = (initial_backoff * (2 ** attempt)) + uniform(0, 1)
+            wait_s = (initial_backoff * (2 ** attempt)) + uniform(1, 3)
             logger.warning(
                 f"RequestException on Key {key_id} (attempt {attempt + 1}/{attempts}): {e}. "
                 f"Retrying in {wait_s:.2f}s..."
@@ -532,6 +567,106 @@ def analyze_text_with_mistral(prompt: str, api_key: str) -> str:
     logger.error(f"Mistral request failed on Key {key_id} after all retries due to persistent errors.")
     final_error_payload = {"error": "API Rate Limit Exceeded. Failed after all retries."}
     return json.dumps(final_error_payload)
+
+
+def analyze_text_with_openai(prompt: str, api_key: str) -> str:
+    """
+    Calls OpenAI chat completions API using gpt-4o-mini.
+    Includes retry with jitter and exponential backoff.
+    """
+    if not api_key:
+        return json.dumps({"error": "Missing OpenAI API key for this request."})
+
+    key_id = f"...{api_key[-4:]}" if len(api_key) > 4 else "ShortKey"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert resume parser and data analyst. Always return STRICT JSON only-"
+                    "no markdown fences, no commentary. Fill missing values with empty strings "
+                    '"" or [] where appropriate.'
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 4096,
+    }
+
+    attempts = 5
+    initial_backoff = 5.0
+
+    for attempt in range(attempts):
+        try:
+            time.sleep(uniform(0.5, 2.5))
+            resp = requests.post(OPENAI_ENDPOINT, headers=headers, json=payload, timeout=120)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                content = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+
+                if isinstance(content, list):
+                    content_parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            content_parts.append(safe_str(part.get("text", "")))
+                        else:
+                            content_parts.append(safe_str(part))
+                    content = "".join(content_parts)
+
+                return safe_str(content).strip()
+
+            if resp.status_code == 429:
+                wait_s = (initial_backoff * (2 ** attempt)) + uniform(1, 3)
+                logger.warning(
+                    f"OpenAI RATE LIMIT (429) on Key {key_id}. "
+                    f"Attempt {attempt + 1}/{attempts}. Pausing for {wait_s:.2f}s..."
+                )
+                time.sleep(wait_s)
+                continue
+
+            if resp.status_code in (500, 502, 503, 504):
+                wait_s = (initial_backoff * (2 ** attempt)) + uniform(1, 3)
+                logger.warning(
+                    f"OpenAI Server Error {resp.status_code} on Key {key_id}. "
+                    f"Attempt {attempt + 1}/{attempts}. Retrying in {wait_s:.2f}s..."
+                )
+                time.sleep(wait_s)
+                continue
+
+            logger.error(f"OpenAI API Error on Key {key_id}: {resp.status_code} - {resp.text}")
+            return json.dumps({"error": f"API Error Status {resp.status_code}: {resp.text}"})
+
+        except requests.exceptions.RequestException as e:
+            wait_s = (initial_backoff * (2 ** attempt)) + uniform(1, 3)
+            logger.warning(
+                f"OpenAI RequestException on Key {key_id} (attempt {attempt + 1}/{attempts}): {e}. "
+                f"Retrying in {wait_s:.2f}s..."
+            )
+            time.sleep(wait_s)
+            continue
+
+    logger.error(f"OpenAI request failed on Key {key_id} after all retries due to persistent errors.")
+    return json.dumps({"error": "API Rate Limit Exceeded. Failed after all retries."})
+
+
+def analyze_text_with_provider(prompt: str, provider: str, api_key: str) -> str:
+    """Routes prompt analysis to selected provider."""
+    provider_normalized = safe_str(provider).strip().lower()
+    if provider_normalized == "openai":
+        return analyze_text_with_openai(prompt, api_key=api_key)
+    return analyze_text_with_mistral(prompt, api_key=api_key)
+
 # ==============================================================================
 #  HELPER & FORMATTING FUNCTIONS
 # ==============================================================================
@@ -608,10 +743,10 @@ def get_highest_education_institute(edu_data):
         return safe_str(edu_data['bachelors']['collegeName'])
     if edu_data.get('diploma') and safe_str(edu_data['diploma'].get('collegeName')):
         return safe_str(edu_data['diploma']['collegeName'])
-    if edu_data.get('intermediate_puc_12th') and safe_str(edu_data['intermediate_puc_12th'].get('collegeName')):
-        return safe_str(edu_data['intermediate_puc_12th']['collegeName'])
-    if edu_data.get('ssc_10th') and safe_str(edu_data['ssc_10th'].get('collegeName')):
-        return safe_str(edu_data['ssc_10th']['collegeName'])
+    if edu_data.get('intermediate_puc_12th') and safe_str(edu_data['intermediate_puc_12th'].get('school_college_name')):
+        return safe_str(edu_data['intermediate_puc_12th']['school_college_name'])
+    if edu_data.get('ssc_10th') and safe_str(edu_data['ssc_10th'].get('schoolName')):
+        return safe_str(edu_data['ssc_10th']['schoolName'])
     return ""
 
 def check_tesseract_installation():
@@ -736,10 +871,10 @@ def calculate_skill_probabilities(data):
 #  MAIN WORKER FUNCTIONS
 # ==============================================================================
 
-def process_resume_for_shortlisting(row, resume_index, user_requirements, company_name, api_key):
+def process_resume_for_shortlisting(row, resume_index, user_requirements, company_name, api_key, provider="Mistral"):
     """
     Worker for shortlisting. 
-    Now includes STRICT Python-based Keyword Validation to prevent "JavaScript" == "Java" confusion.
+    Includes STRICT Python-based Keyword Validation to prevent "JavaScript" == "Java" confusion.
     """
     user_id = row['user_id']
     resume_link = row['Resume link']
@@ -749,7 +884,7 @@ def process_resume_for_shortlisting(row, resume_index, user_requirements, compan
         'Resume Link': resume_link,
         'Company Name': company_name,
         'Overall Probability': 0, 'Overall Remarks': "Error processing",
-        'Priority Band': "Not Shortlisted", # Default
+        'Priority Band': "Not Shortlisted",
         'Projects Probability': 0, 'Projects Remarks': "",
         'Skills Probability': 0, 'Skills Remarks': "",
         'Experience Probability': 0, 'Experience Remarks': "",
@@ -785,21 +920,13 @@ def process_resume_for_shortlisting(row, resume_index, user_requirements, compan
         #  CRITICAL FIX: PYTHON-BASED "JAVA vs JAVASCRIPT" VALIDATION
         # ==============================================================================
         
-        # 1. Clean text for checking
         text_lower = resume_text.lower()
         reqs_lower = user_requirements.lower()
-        
         system_warning = ""
 
-        # 2. Check for Java specifically using REGEX (Word Boundaries)
-        # OLD BUGGY WAY: if "java" in reqs_lower: (This triggered on "JavaScript")
-        # NEW CORRECT WAY: Checks for "Java" only if it is a whole word.
+        # Check for Java specifically using REGEX (Word Boundaries)
         if re.search(r'\bjava\b', reqs_lower):
-            # Regex \bjava\b means "Java" must be surrounded by spaces or punctuation.
-            # It matches "Java," "Java." " Java "
-            # It DOES NOT match "JavaScript"
             has_standalone_java = re.search(r'\bjava\b', text_lower)
-            
             if not has_standalone_java:
                 system_warning += "\n\n[SYSTEM WARNING]: The user explicitly requires 'Java' (the backend language). I have scanned the text and 'Java' appears to be MISSING as a standalone word. The text might contain 'JavaScript', but THAT IS NOT JAVA. Treat 'Java' as MISSING."
 
@@ -875,7 +1002,7 @@ Return your answer as a **single, pure JSON object**.
 {resume_text}
 ---
 """
-        mistral_response_text = analyze_text_with_mistral(prompt, api_key=api_key)
+        mistral_response_text = analyze_text_with_provider(prompt, provider=provider, api_key=api_key)
 
         data = {}
         try:
@@ -927,7 +1054,7 @@ Return your answer as a **single, pure JSON object**.
     return result
 
 
-def process_resume_comprehensively(row, resume_index, analysis_type, company_name, api_key):
+def process_resume_comprehensively(row, resume_index, analysis_type, company_name, api_key, provider="Mistral"):
     """Worker for comprehensive data extraction with AI-driven project classification."""
     user_id = row['user_id']
     resume_link = row['Resume link']
@@ -940,6 +1067,7 @@ def process_resume_comprehensively(row, resume_index, analysis_type, company_nam
         ]
         result = {col: "" for col in result_cols}
     else:
+        # Define the base columns
         base_columns = [
             'User ID', 'Resume Link', 'Full Name', 'Mobile Number', 'Email ID', 'LinkedIn Link', 'GitHub Link',
             'Other Links', 'Skills', 'Internal Project Title', 'Internal Projects Techstacks',
@@ -948,16 +1076,46 @@ def process_resume_comprehensively(row, resume_index, analysis_type, company_nam
             'Currently Working? (Yes/No)', 'Years of IT Experience', 'Years of Non-IT Experience', 'City', 'State',
             'Certifications', 'Awards', 'Achievements', 'GitHub Repo Count', 'Highest Education Institute Name'
         ]
-        education_cols = [
-            f"{level} {field}"
-            for level in ['Masters/Doctorate', 'Bachelors', 'Diploma', 'Intermediate / PUC / 12th', 'SSC / 10th']
-            for field in ['Course Name', 'College Name', 'Department Name', 'Year of Completion', 'Percentage']
-        ]
-        education_cols = [c.replace("Intermediate / PUC / 12th Course Name", "Intermediate / PUC / 12th Name") for c in education_cols]
-        education_cols = [c.replace("SSC / 10th Course Name", "SSC / 10th Name") for c in education_cols]
-        education_cols = [c for c in education_cols if "Masters/Doctorate Name" not in c and "Bachelors Name" not in c and "Diploma Name" not in c]
 
-        all_columns = base_columns + SKILL_COLUMNS + education_cols
+        # Define Explicit Education Columns (Updated with Branch)
+        education_levels = [
+            'Masters/Doctorate', 
+            'Bachelors', 
+            'Diploma', 
+            'Intermediate / PUC / 12th', 
+            'SSC / 10th'
+        ]
+        
+        edu_cols = []
+        for level in education_levels:
+            if level == 'SSC / 10th':
+                # 10th usually doesn't have a "Branch", just Board
+                edu_cols.extend([
+                    f"{level} Board",
+                    f"{level} School Name",
+                    f"{level} Year of Completion",
+                    f"{level} Percentage"
+                ])
+            elif level == 'Intermediate / PUC / 12th':
+                # 12th has "Stream" (e.g. MPC) acting as Branch
+                edu_cols.extend([
+                    f"{level} Board",
+                    f"{level} Stream/Branch",
+                    f"{level} School/College Name",
+                    f"{level} Year of Completion",
+                    f"{level} Percentage"
+                ])
+            else:
+                # Degree/Diploma has Course AND Branch
+                edu_cols.extend([
+                    f"{level} Course Name",
+                    f"{level} Branch",
+                    f"{level} College Name",
+                    f"{level} Year of Completion",
+                    f"{level} Percentage"
+                ])
+
+        all_columns = base_columns + SKILL_COLUMNS + edu_cols
         result = {col: "" for col in all_columns}
 
     result['User ID'] = user_id
@@ -1004,7 +1162,7 @@ Example Project Entry: {{ "title": "Jobby App", "techStack": ["React", "JS"], "c
             prompt = f"""
 You are a project classification expert. Analyze the provided resume text and perform this CRITICAL task:
 1. Extract all projects mentioned in the resume.
-2. For each project, determine if it is an "Internal" or "External" project by comparing it against the provided OFFICIAL INTERNAL PROJECTS LIST. Your matching should be smart and flexible (e.g., 'Jobby App' in the list should match 'Jobby-app' in the resume).
+2. For each project, determine if it is an "Internal" or "External" project by comparing it against the provided OFFICIAL INTERNAL PROJECTS LIST. Your matching should be smart and flexible.
 3. Return ONLY a pure JSON object with the results.
 
 OFFICIAL INTERNAL PROJECTS LIST:
@@ -1029,6 +1187,7 @@ Resume Text:
 ---
 """
         elif analysis_type == "All Data":
+            # UPDATED PROMPT: Asking for "branch" and "stream" explicitly
             prompt = f"""
 You are a machine that strictly outputs a single, valid JSON object. Analyze the resume text provided below to populate the specified JSON structure.
 
@@ -1040,11 +1199,40 @@ You are a machine that strictly outputs a single, valid JSON object. Analyze the
   "achievements": ["list of strings"], "yearsITExperience": "float or string", "yearsNonITExperience": "float or string",
   {project_instruction_block}
   "education": {{
-    "masters_doctorate": {{"courseName": "string", "departmentName": "string", "completionYear": "string", "percentage": "string", "collegeName": "string"}},
-    "bachelors": {{"courseName": "string", "departmentName": "string", "completionYear": "string", "percentage": "string", "collegeName": "string"}},
-    "diploma": {{"courseName": "string", "departmentName": "string", "completionYear": "string", "percentage": "string", "collegeName": "string"}},
-    "intermediate_puc_12th": {{"schoolName": "string", "departmentName": "string", "completionYear": "string", "percentage": "string", "collegeName": "string"}},
-    "ssc_10th": {{"schoolName": "string", "completionYear": "string", "percentage": "string", "collegeName": "string"}}
+    "masters_doctorate": {{
+        "courseName": "e.g. M.Tech, MBA, PhD", 
+        "branch": "e.g. Computer Science, VLSI, Marketing",
+        "collegeName": "string", 
+        "completionYear": "string", 
+        "percentage": "string (e.g. 85% or 8.5 CGPA)"
+    }},
+    "bachelors": {{
+        "courseName": "e.g. B.Tech, B.Sc, B.Com", 
+        "branch": "e.g. Computer Science, Mechanical, Civil",
+        "collegeName": "string", 
+        "completionYear": "string", 
+        "percentage": "string"
+    }},
+    "diploma": {{
+        "courseName": "e.g. Diploma", 
+        "branch": "e.g. ECE, CSE",
+        "collegeName": "string", 
+        "completionYear": "string", 
+        "percentage": "string"
+    }},
+    "intermediate_puc_12th": {{
+        "board": "e.g. CBSE, State Board", 
+        "stream": "e.g. MPC, BiPC, Science, Commerce",
+        "school_college_name": "string", 
+        "completionYear": "string", 
+        "percentage": "string"
+    }},
+    "ssc_10th": {{
+        "board": "e.g. CBSE, SSC", 
+        "schoolName": "string", 
+        "completionYear": "string", 
+        "percentage": "string"
+    }}
   }},
   "experience": [ {{ "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string or list of strings" }} ]
 }}
@@ -1087,7 +1275,7 @@ Resume Text:
 ---
 """
 
-        mistral_response_text = analyze_text_with_mistral(prompt, api_key=api_key)
+        mistral_response_text = analyze_text_with_provider(prompt, provider=provider, api_key=api_key)
         mistral_response_text_for_logging = mistral_response_text
         data = relaxed_json_loads(mistral_response_text)
         if not isinstance(data, dict): raise ValueError(f"AI returned non-dict data. Type: {type(data)}")
@@ -1163,23 +1351,48 @@ Resume Text:
             if analysis_type == "All Data":
                 result.update({'Years of IT Experience': safe_str(data.get('yearsITExperience', "")), 'Years of Non-IT Experience': safe_str(data.get('yearsNonITExperience', ""))})
 
+                # --- EXTRACT DETAILED EDUCATION (UPDATED WITH BRANCH) ---
                 edu = data.get('education', {}) if isinstance(data.get('education'), dict) else {}
-
                 result['Highest Education Institute Name'] = get_highest_education_institute(edu)
-                edu_levels = {
-                    'masters_doctorate': ('Masters/Doctorate', 'courseName'), 'bachelors': ('Bachelors', 'courseName'),
-                    'diploma': ('Diploma', 'courseName'), 'intermediate_puc_12th': ('Intermediate / PUC / 12th', 'schoolName'),
-                    'ssc_10th': ('SSC / 10th', 'schoolName')
-                }
-                for key, (prefix, name_key) in edu_levels.items():
-                    level_data = edu.get(key, {}) if isinstance(edu.get(key, {}), dict) else {}
-                    if key in ['intermediate_puc_12th', 'ssc_10th']:
-                        result[f'{prefix} Name'] = safe_str(level_data.get(name_key, ''))
-                    result[f'{prefix} Course Name'] = safe_str(level_data.get('courseName', ''))
-                    result[f'{prefix} College Name'] = safe_str(level_data.get('collegeName', ''))
-                    result[f'{prefix} Department Name'] = safe_str(level_data.get('departmentName', ''))
-                    result[f'{prefix} Year of Completion'] = safe_str(level_data.get('completionYear', ''))
-                    result[f'{prefix} Percentage'] = safe_str(level_data.get('percentage', ''))
+
+                # Masters / Doctorate
+                md = edu.get('masters_doctorate', {}) or {}
+                result['Masters/Doctorate Course Name'] = safe_str(md.get('courseName', ''))
+                result['Masters/Doctorate Branch'] = safe_str(md.get('branch', '')) # NEW
+                result['Masters/Doctorate College Name'] = safe_str(md.get('collegeName', ''))
+                result['Masters/Doctorate Year of Completion'] = safe_str(md.get('completionYear', ''))
+                result['Masters/Doctorate Percentage'] = safe_str(md.get('percentage', ''))
+
+                # Bachelors
+                bach = edu.get('bachelors', {}) or {}
+                result['Bachelors Course Name'] = safe_str(bach.get('courseName', ''))
+                result['Bachelors Branch'] = safe_str(bach.get('branch', '')) # NEW
+                result['Bachelors College Name'] = safe_str(bach.get('collegeName', ''))
+                result['Bachelors Year of Completion'] = safe_str(bach.get('completionYear', ''))
+                result['Bachelors Percentage'] = safe_str(bach.get('percentage', ''))
+
+                # Diploma
+                dip = edu.get('diploma', {}) or {}
+                result['Diploma Course Name'] = safe_str(dip.get('courseName', ''))
+                result['Diploma Branch'] = safe_str(dip.get('branch', '')) # NEW
+                result['Diploma College Name'] = safe_str(dip.get('collegeName', ''))
+                result['Diploma Year of Completion'] = safe_str(dip.get('completionYear', ''))
+                result['Diploma Percentage'] = safe_str(dip.get('percentage', ''))
+
+                # Intermediate / PUC / 12th
+                inter = edu.get('intermediate_puc_12th', {}) or {}
+                result['Intermediate / PUC / 12th Board'] = safe_str(inter.get('board', ''))
+                result['Intermediate / PUC / 12th Stream/Branch'] = safe_str(inter.get('stream', '')) # NEW
+                result['Intermediate / PUC / 12th School/College Name'] = safe_str(inter.get('school_college_name', ''))
+                result['Intermediate / PUC / 12th Year of Completion'] = safe_str(inter.get('completionYear', ''))
+                result['Intermediate / PUC / 12th Percentage'] = safe_str(inter.get('percentage', ''))
+
+                # SSC / 10th (Usually no branch)
+                ssc = edu.get('ssc_10th', {}) or {}
+                result['SSC / 10th Board'] = safe_str(ssc.get('board', ''))
+                result['SSC / 10th School Name'] = safe_str(ssc.get('schoolName', ''))
+                result['SSC / 10th Year of Completion'] = safe_str(ssc.get('completionYear', ''))
+                result['SSC / 10th Percentage'] = safe_str(ssc.get('percentage', ''))
 
     except json.JSONDecodeError as e:
         error_msg = "Error: AI returned a malformed response that could not be parsed."
@@ -1208,7 +1421,7 @@ Resume Text:
 #  BATCH PROCESSING & UI
 # ==============================================================================
 
-def process_resumes_in_batches_live(df, batch_size, worker_function, display_columns, **kwargs):
+def process_resumes_in_batches_live(df, batch_size, worker_function, display_columns, provider, **kwargs):
     st.session_state.comprehensive_results = []
 
     progress_text = st.empty()
@@ -1229,17 +1442,38 @@ def process_resumes_in_batches_live(df, batch_size, worker_function, display_col
         worksheet = get_or_create_worksheet(gspread_client, GSHEET_NAME, subsheet_name)
 
     num_resumes = len(df)
-    num_keys = len(MISTRAL_API_KEYS)
-    
-    logger.info(f"Using {num_keys} API keys for {num_resumes} resumes.")
+    provider_normalized = safe_str(provider).strip().lower()
+
+    if provider_normalized == "openai":
+        if not OPENAI_API_KEY:
+            st.error("OPENAI_API_KEY not found. Add it in secrets.toml.")
+            return
+        active_api_keys = [OPENAI_API_KEY]
+    else:
+        if not MISTRAL_API_KEYS:
+            st.error("Mistral API keys not found. Add MISTRAL_API_KEY_1..12 or MISTRAL_API_KEY.")
+            return
+        active_api_keys = MISTRAL_API_KEYS
+
+    num_keys = len(active_api_keys)
+    logger.info(
+        f"Using provider '{provider}' with {num_keys} API key(s) for {num_resumes} resumes."
+    )
 
     with ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = {}
         for i, (df_index, row) in enumerate(df.iterrows()):
             key_index = i % num_keys
-            assigned_key = MISTRAL_API_KEYS[key_index]
+            assigned_key = active_api_keys[key_index]
             
-            future = executor.submit(worker_function, row, df_index, **kwargs, api_key=assigned_key)
+            future = executor.submit(
+                worker_function,
+                row,
+                df_index,
+                **kwargs,
+                api_key=assigned_key,
+                provider=provider,
+            )
             futures[future] = df_index
 
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
@@ -1308,10 +1542,43 @@ def main():
 
     with st.sidebar:
         st.header("⚙️ Configuration")
+        
+        selected_provider = st.selectbox(
+            "AI Provider",
+            options=["OpenAI", "Mistral"],
+            key="api_provider",
+            help="Select which provider should process resumes for this run.",
+        )
+
+        if selected_provider == "OpenAI":
+            recommended_concurrency = 1
+            concurrency_help = (
+                "OpenAI uses a single key (OPENAI_API_KEY). Keep concurrency low to reduce rate limits."
+            )
+            if not OPENAI_API_KEY:
+                st.error("OPENAI_API_KEY not found in secrets.toml.")
+        else:
+            loaded_mistral_keys = len(MISTRAL_API_KEYS)
+            recommended_concurrency = loaded_mistral_keys if loaded_mistral_keys else 1
+            concurrency_help = (
+                f"Loaded {loaded_mistral_keys} Mistral key(s). "
+                f"Recommended concurrency: {recommended_concurrency}."
+            )
+            if not MISTRAL_API_KEYS:
+                st.error("Mistral API keys not found in secrets.toml/environment.")
+
+        recommended_concurrency = max(1, min(20, int(recommended_concurrency)))
+        if st.session_state.get('provider_for_batch_size') != selected_provider:
+            st.session_state.batch_size = recommended_concurrency
+            st.session_state.provider_for_batch_size = selected_provider
+
+        current_batch_size = max(1, min(20, int(st.session_state.get('batch_size', recommended_concurrency))))
         st.session_state.batch_size = st.slider(
             "Concurrency",
-            1, 20, 8,
-            help="Number of resumes to process in parallel. You can use a higher number with more keys."
+            min_value=1,
+            max_value=20,
+            value=current_batch_size,
+            help=concurrency_help,
         )
         st.session_state.enable_ocr = st.checkbox(
             "Enable OCR for PDFs & Images",
@@ -1389,18 +1656,36 @@ def main():
                     )
                     button_text = f"🚀 Start Shortlisting for {len(df_input)} Resumes"
                 else:
-                    shortlisting_mode = "N/A" # Set a placeholder if not in shortlisting mode
+                    shortlisting_mode = "N/A"
                     button_text = f"🚀 Start '{analysis_type}' Extraction for {len(df_input)} Resumes"
+
+                st.caption(f"Provider for this run: {st.session_state.api_provider}")
+                provider_key_missing = (
+                    (st.session_state.api_provider == "OpenAI" and not OPENAI_API_KEY) or
+                    (st.session_state.api_provider == "Mistral" and not MISTRAL_API_KEYS)
+                )
+
+                if not company_name.strip():
+                    start_help = "Please enter a Company Name to start the analysis."
+                elif provider_key_missing:
+                    if st.session_state.api_provider == "OpenAI":
+                        start_help = "OPENAI_API_KEY is required in secrets.toml for OpenAI runs."
+                    else:
+                        start_help = "MISTRAL_API_KEY_1..12 or MISTRAL_API_KEY is required for Mistral runs."
+                else:
+                    start_help = ""
 
                 start_button = st.button(
                     button_text,
                     type="primary",
-                    disabled=not company_name.strip(),
-                    help="Please enter a Company Name to start the analysis." if not company_name.strip() else ""
+                    disabled=(not company_name.strip()) or provider_key_missing,
+                    help=start_help
                 )
 
                 if not company_name.strip() and df_input is not None and not start_button:
                      st.warning("Company Name is a required field.", icon="⚠️")
+                if provider_key_missing and df_input is not None and not start_button:
+                     st.warning(f"{st.session_state.api_provider} key configuration is missing.", icon="⚠️")
 
             live_results_container = st.container()
 
@@ -1425,7 +1710,8 @@ def main():
 
                         process_resumes_in_batches_live(
                             df=df_input, batch_size=st.session_state.batch_size, worker_function=process_resume_for_shortlisting,
-                            display_columns=display_columns, user_requirements=user_requirements.strip(), company_name=company_name.strip()
+                            display_columns=display_columns, provider=st.session_state.api_provider,
+                            user_requirements=user_requirements.strip(), company_name=company_name.strip()
                         )
                     else:
                         st.session_state.last_analysis_mode = analysis_type
@@ -1437,12 +1723,25 @@ def main():
                                 'External Project Titles', 'External Project Techstacks'
                             ]
                         else:
-                            all_extraction_columns = [
+                            # --- COLUMN DEFINITIONS FOR ALL DATA ---
+                            base_extraction_columns = [
                                 'User ID', 'Resume Link', 'Full Name', 'Mobile Number', 'Email ID',
                                 'LinkedIn Link', 'GitHub Link', 'GitHub Repo Count', 'Other Links', 'City', 'State',
                                 'Years of IT Experience', 'Years of Non-IT Experience',
                                 'Highest Education Institute Name', 'Skills'
-                            ] + SKILL_COLUMNS + [
+                            ] 
+                            
+                            # Detailed Education Columns
+                            detailed_edu_columns = [
+                                'Masters/Doctorate Course Name', 'Masters/Doctorate Branch', 'Masters/Doctorate College Name', 'Masters/Doctorate Year of Completion', 'Masters/Doctorate Percentage',
+                                'Bachelors Course Name', 'Bachelors Branch', 'Bachelors College Name', 'Bachelors Year of Completion', 'Bachelors Percentage',
+                                'Diploma Course Name', 'Diploma Branch', 'Diploma College Name', 'Diploma Year of Completion', 'Diploma Percentage',
+                                'Intermediate / PUC / 12th Board', 'Intermediate / PUC / 12th Stream/Branch', 'Intermediate / PUC / 12th School/College Name', 'Intermediate / PUC / 12th Year of Completion', 'Intermediate / PUC / 12th Percentage',
+                                'SSC / 10th Board', 'SSC / 10th School Name', 'SSC / 10th Year of Completion', 'SSC / 10th Percentage'
+                            ]
+
+                            # Project & Experience Columns
+                            project_exp_columns = [
                                 'Total Projects Count', 'Internal Projects Count', 'External Projects Count',
                                 'Internal Project Title', 'Internal Projects Techstacks',
                                 'External Project Title', 'External Projects Techstacks',
@@ -1450,12 +1749,14 @@ def main():
                                 'Latest Experience Start Date', 'Latest Experience End Date', 'Currently Working? (Yes/No)',
                                 'Certifications', 'Awards', 'Achievements',
                             ]
-                            display_columns = all_extraction_columns
+                            
+                            display_columns = base_extraction_columns + SKILL_COLUMNS + detailed_edu_columns + project_exp_columns
 
                         process_resumes_in_batches_live(
                             df=df_input, batch_size=st.session_state.batch_size,
                             worker_function=process_resume_comprehensively,
                             display_columns=display_columns,
+                            provider=st.session_state.api_provider,
                             analysis_type=analysis_type,
                             company_name=company_name.strip()
                         )
@@ -1518,15 +1819,25 @@ def main():
 
         else: # Comprehensive Modes
             final_df = coerce_probability_columns(final_df)
+            
+            # --- FINAL OUTPUT COLUMN ORDERING ---
             base_cols = ['User ID', 'Resume Link', 'Full Name', 'Mobile Number', 'Email ID', 'LinkedIn Link', 'GitHub Link', 'GitHub Repo Count', 'Other Links', 'City', 'State', 'Years of IT Experience', 'Years of Non-IT Experience', 'Highest Education Institute Name', 'Skills']
             project_cols = ['Total Projects Count', 'Internal Projects Count', 'External Projects Count','Internal Project Title', 'Internal Projects Techstacks', 'External Project Title', 'External Projects Techstacks']
             exp_cols = ['Latest Experience Company Name', 'Latest Experience Job Title', 'Latest Experience Start Date', 'Latest Experience End Date', 'Currently Working? (Yes/No)']
             other_cols = ['Certifications', 'Awards', 'Achievements']
-            edu_levels = ['Masters/Doctorate', 'Bachelors', 'Diploma', 'Intermediate / PUC / 12th', 'SSC / 10th']
-            edu_fields = ['Name','Course Name', 'College Name', 'Department Name', 'Year of Completion', 'Percentage']
-            edu_cols = [f"{level} {field}" for level in edu_levels for field in edu_fields]
-            final_column_order = base_cols + SKILL_COLUMNS + project_cols + exp_cols + other_cols + edu_cols + ['Company Name', 'Analysis Datetime']
+            
+            # Explicitly define the education columns order for download (UPDATED WITH BRANCH)
+            edu_cols_ordered = [
+                'Masters/Doctorate Course Name', 'Masters/Doctorate Branch', 'Masters/Doctorate College Name', 'Masters/Doctorate Year of Completion', 'Masters/Doctorate Percentage',
+                'Bachelors Course Name', 'Bachelors Branch', 'Bachelors College Name', 'Bachelors Year of Completion', 'Bachelors Percentage',
+                'Diploma Course Name', 'Diploma Branch', 'Diploma College Name', 'Diploma Year of Completion', 'Diploma Percentage',
+                'Intermediate / PUC / 12th Board', 'Intermediate / PUC / 12th Stream/Branch', 'Intermediate / PUC / 12th School/College Name', 'Intermediate / PUC / 12th Year of Completion', 'Intermediate / PUC / 12th Percentage',
+                'SSC / 10th Board', 'SSC / 10th School Name', 'SSC / 10th Year of Completion', 'SSC / 10th Percentage'
+            ]
+
+            final_column_order = base_cols + SKILL_COLUMNS + edu_cols_ordered + project_cols + exp_cols + other_cols + ['Company Name', 'Analysis Datetime']
             final_column_order_filtered = [col for col in final_column_order if col in final_df.columns]
+            
             final_df_ordered = final_df.reindex(columns=final_column_order_filtered, fill_value='')
             file_name = f"resume_analysis_{st.session_state.last_analysis_mode.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
@@ -1535,10 +1846,8 @@ def main():
         filtered_df = final_df_ordered.copy()
 
         with st.expander("🔍 Show Interactive Filters", expanded=True):
-            # The layout is now managed with 4 columns for better alignment
             col1, col2, col3, col4 = st.columns(4)
             
-            # --- Column 1: Priority, Search, and Project Checkboxes ---
             with col1:
                 if 'Priority Band' in filtered_df.columns:
                     unique_bands = sorted(final_df_ordered['Priority Band'].cat.categories.tolist())
@@ -1556,7 +1865,6 @@ def main():
                         search_series = filtered_df[searchable_cols].apply(lambda row: ' '.join(row.values.astype(str)), axis=1)
                         filtered_df = filtered_df[search_series.str.contains(search_term, case=False, na=False)]
 
-            # --- Column 2: Key Probability Sliders ---
             with col2:
                 if 'Overall Probability' in filtered_df.columns:
                     prob_range = st.slider('Filter by Overall Probability:', 0, 100, (0, 100))
@@ -1568,10 +1876,8 @@ def main():
                     if skills_prob_range != (0, 100):
                         filtered_df = filtered_df[(filtered_df['Skills Probability'] >= skills_prob_range[0]) & (filtered_df['Skills Probability'] <= skills_prob_range[1])]
 
-            # --- Column 3: Checkboxes + Experience Slider ---
             with col3:
-                # NEW LAYOUT: Checkboxes moved here, above the Experience slider
-                st.write("Project Filters:") # Label for clarity
+                st.write("Project Filters:")
                 if 'Internal Projects Count' in filtered_df.columns:
                     has_internal = st.checkbox('Show only with Internal Projects')
                     if has_internal:
@@ -1581,14 +1887,13 @@ def main():
                     if has_external:
                         filtered_df = filtered_df[filtered_df['External Projects Count'] > 0]
                 
-                st.write("") # Spacer
+                st.write("") 
 
                 if 'Experience Probability' in filtered_df.columns:
                     exp_prob_range = st.slider('Filter by Experience Probability:', 0, 100, (0, 100))
                     if exp_prob_range != (0, 100):
                         filtered_df = filtered_df[(filtered_df['Experience Probability'] >= exp_prob_range[0]) & (filtered_df['Experience Probability'] <= exp_prob_range[1])]
 
-            # --- Column 4: Remaining Probability Sliders ---
             with col4:
                 if 'Projects Probability' in filtered_df.columns:
                     proj_prob_range = st.slider('Filter by Projects Probability:', 0, 100, (0, 100))
@@ -1601,7 +1906,6 @@ def main():
                         filtered_df = filtered_df[(filtered_df['Other Probability'] >= other_prob_range[0]) & (filtered_df['Other Probability'] <= other_prob_range[1])]
             
             st.markdown("---")
-            # The project count filters remain below the divider
             p_col1, p_col2, p_col3 = st.columns(3)
             with p_col1:
                 if 'Total Projects Count' in filtered_df.columns:
@@ -1632,9 +1936,10 @@ def main():
         )
 
 if __name__ == "__main__":
-    if not MISTRAL_API_KEYS:
-        st.error("Missing Mistral API keys. Set MISTRAL_API_KEY_1 in st.secrets or an environment variable.", icon="🚨")
-    elif not st.secrets.get("gcp_service_account"):
-         st.error("Missing GCP Service Account credentials in st.secrets. Google Sheets integration will be disabled.", icon="📄")
+    if not MISTRAL_API_KEYS and not OPENAI_API_KEY:
+        st.error(
+            "Missing API keys. Add OPENAI_API_KEY and/or MISTRAL_API_KEY_1..12 (or MISTRAL_API_KEY) to st.secrets.",
+            icon="🚨",
+        )
     else:
         main()
