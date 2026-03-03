@@ -18,6 +18,25 @@
     "desktop:dist": "npm run desktop:prepare-env && npm run build && electron-builder --win nsis",
     "desktop:portable": "npm run desktop:prepare-env && npm run build && electron-builder --win portable"
   },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.80",
+    "axios": "^1.12.2",
+    "cors": "^2.8.5",
+    "csv-parse": "^6.1.0",
+    "csv-stringify": "^6.6.0",
+    "dayjs": "^1.11.18",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "file-type": "^21.0.0",
+    "form-data": "^4.0.4",
+    "googleapis": "^156.0.0",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^5.4.296",
+    "tesseract.js": "^6.0.1",
+    "uuid": "^13.0.0"
+  },
   "devDependencies": {
     "concurrently": "^9.2.1",
     "electron": "^36.9.0",

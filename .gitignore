@@ -5,12 +5,10 @@ __pycache__/
 node_modules/
 dist/
 .env
+desktop/.env.runtime
 client/dist/
 server/dist/
 release/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# local runtime env
-desktop/.env.runtime
