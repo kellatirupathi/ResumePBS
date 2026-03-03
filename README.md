@@ -67,6 +67,7 @@ Notes:
 - On first run, app creates `%APPDATA%/AI Resume Analyzer/.env` if missing.
 - That file is auto-copied from the bundled desktop env included at build time (`.env` if available, otherwise `.env.example`).
 - End users do not need to create a separate `.env` manually when keys are bundled in the installer.
+- Auto-update is enabled in packaged desktop builds.
 
 ## GitHub .exe Link (for sharing)
 
@@ -79,8 +80,13 @@ How to publish downloadable `.exe` links:
 1. Push code to GitHub.
 2. Create and push a version tag (example `v1.0.0`).
 3. Workflow builds `release/*.exe` on Windows.
-4. Built installer is attached to the GitHub Release for that tag.
-5. Share the GitHub Release asset link with others.
+4. Workflow also uploads `latest.yml` and `*.blockmap` (required for desktop auto-update).
+5. Built installer is attached to the GitHub Release for that tag.
+6. Share the GitHub Release asset link with others.
+
+Auto-update requirement:
+
+- Always publish a higher version tag (`v1.0.2` -> `v1.0.3`), never reuse same version/tag.
 
 To bundle API keys in GitHub-built installers, configure repository secrets used by:
 

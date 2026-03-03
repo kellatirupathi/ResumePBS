@@ -1,9 +1,13 @@
 {
   "name": "mistral-resume-analyser-monorepo",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "AI Resume Analyzer web and desktop application",
   "author": "NxtWave",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kellatirupathi/ResumePBS.git"
+  },
   "main": "desktop/main.cjs",
   "workspaces": [
     "server",
@@ -26,6 +30,7 @@
     "csv-stringify": "^6.6.0",
     "dayjs": "^1.11.18",
     "dotenv": "^17.2.3",
+    "electron-updater": "^6.3.9",
     "express": "^5.1.0",
     "file-type": "^21.0.0",
     "form-data": "^4.0.4",
@@ -45,6 +50,7 @@
   "build": {
     "appId": "com.nxtwave.airesumeanalyzer",
     "productName": "AI Resume Analyzer",
+    "artifactName": "AI-Resume-Analyzer-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -80,6 +86,13 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "kellatirupathi",
+        "repo": "ResumePBS"
+      }
+    ]
   }
 }

@@ -11,10 +11,23 @@ const SERVER_RETRY_DELAY_MS = 500;
 let serverPort = DEFAULT_PORT;
 let mainWindow = null;
 let serverBootPromise = null;
+let hasCheckedForUpdates = false;
 
 app.setName("AI Resume Analyzer");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const showErrorDialog = (title, details) => {
+  dialog.showErrorBox(title, details);
+};
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+  showErrorDialog("Desktop Runtime Error", error instanceof Error ? error.message : String(error));
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
 
 const readPortFromEnvFile = (envFilePath) => {
   if (!envFilePath || !fs.existsSync(envFilePath)) return null;
@@ -158,6 +171,17 @@ const createMainWindow = async () => {
     return { action: "deny" };
   });
 
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    showErrorDialog(
+      "UI Load Failed",
+      `Failed to load app UI.\nCode: ${errorCode}\nReason: ${errorDescription}\nURL: ${validatedURL}`,
+    );
+  });
+
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    showErrorDialog("UI Process Crashed", `Reason: ${details.reason}`);
+  });
+
   const devUrl = process.env.ELECTRON_START_URL;
   if (devUrl) {
     await mainWindow.loadURL(devUrl);
@@ -174,12 +198,48 @@ const createMainWindow = async () => {
   await mainWindow.loadFile(clientEntryPath);
 };
 
+const setupAutoUpdates = () => {
+  if (!app.isPackaged || hasCheckedForUpdates) return;
+  hasCheckedForUpdates = true;
+
+  try {
+    const { autoUpdater } = require("electron-updater");
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on("error", (error) => {
+      console.error("Auto-update error:", error instanceof Error ? error.message : String(error));
+    });
+
+    autoUpdater.on("update-downloaded", async () => {
+      const result = await dialog.showMessageBox(mainWindow ?? undefined, {
+        type: "info",
+        buttons: ["Restart now", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+        title: "Update Ready",
+        message: "A new update has been downloaded.",
+        detail: "Restart the app now to apply the update.",
+      });
+
+      if (result.response === 0) {
+        setImmediate(() => autoUpdater.quitAndInstall(false, true));
+      }
+    });
+
+    void autoUpdater.checkForUpdatesAndNotify();
+  } catch (error) {
+    console.error("Auto-update setup failed:", error);
+  }
+};
+
 app.whenReady().then(async () => {
   try {
     await startInternalServer();
     await createMainWindow();
+    setupAutoUpdates();
   } catch (error) {
-    dialog.showErrorBox(
+    showErrorDialog(
       "Desktop Startup Failed",
       error instanceof Error ? error.message : String(error),
     );
@@ -189,7 +249,9 @@ app.whenReady().then(async () => {
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    void createMainWindow();
+    void createMainWindow().catch((error) => {
+      showErrorDialog("Window Creation Failed", error instanceof Error ? error.message : String(error));
+    });
   }
 });
 

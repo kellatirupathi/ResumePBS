@@ -26,6 +26,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Sync package version with tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
       - name: Create bundled .env from repository secrets
         shell: bash
         run: |
@@ -57,10 +64,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-desktop-installer
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/latest.yml
+            release/*.blockmap
 
       - name: Publish installer to GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.exe
+          files: |
+            release/*.exe
+            release/latest.yml
+            release/*.blockmap
