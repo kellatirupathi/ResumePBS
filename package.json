@@ -1,0 +1,66 @@
+{
+  "name": "mistral-resume-analyser-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AI Resume Analyzer web and desktop application",
+  "author": "NxtWave",
+  "main": "desktop/main.cjs",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
+    "build": "npm run build --workspace server && npm run build --workspace client",
+    "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace client",
+    "desktop:prepare-env": "node desktop/prepare-env.cjs",
+    "desktop:dev": "npm run desktop:prepare-env && npm run build && node desktop/run-electron.cjs",
+    "desktop:dist": "npm run desktop:prepare-env && npm run build && electron-builder --win nsis",
+    "desktop:portable": "npm run desktop:prepare-env && npm run build && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "electron": "^36.9.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.nxtwave.airesumeanalyzer",
+    "productName": "AI Resume Analyzer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "client/dist/**/*",
+      "server/dist/**/*",
+      "server/resources/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "desktop/.env.runtime",
+        "to": ".env"
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/@napi-rs/**/*",
+      "node_modules/tesseract.js-core/**/*"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

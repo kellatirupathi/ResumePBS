@@ -1610,7 +1610,6 @@ def main():
         if not all(col in df_input.columns for col in ['user_id', 'Resume link']):
             st.error("Input data must contain 'user_id' and 'Resume link' columns.")
         else:
-            st.success(f"Successfully loaded {len(df_input)} resume entries.")
             st.markdown("---")
 
             col1, col2 = st.columns(2)

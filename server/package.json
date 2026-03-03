@@ -1,0 +1,42 @@
+{
+  "name": "resume-analyzer-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.80",
+    "axios": "^1.12.2",
+    "cors": "^2.8.5",
+    "csv-parse": "^6.1.0",
+    "csv-stringify": "^6.6.0",
+    "dayjs": "^1.11.18",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "file-type": "^21.0.0",
+    "form-data": "^4.0.4",
+    "googleapis": "^156.0.0",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^5.4.296",
+    "tesseract.js": "^6.0.1",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/morgan": "^1.9.10",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.5.2",
+    "@types/pdf-parse": "^1.1.5",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}
