@@ -245,25 +245,91 @@ export const classifyAndFormatProjectsFromAi = (projectsRaw: unknown): Record<st
 
   const projects = Array.isArray(projectsRaw) ? projectsRaw : [];
 
+  const pickFirstString = (values: unknown[]): string => {
+    for (const value of values) {
+      const normalized = safeStr(value).trim();
+      if (normalized) return normalized;
+    }
+    return "";
+  };
+
+  const normalizeTechStack = (projectObj: Record<string, unknown>): string => {
+    const candidates = [
+      projectObj.techStack,
+      projectObj.techstack,
+      projectObj.tech_stack,
+      projectObj.technologies,
+      projectObj.technology,
+      projectObj.stack,
+      projectObj.tools,
+    ];
+
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) {
+        const joined = candidate
+          .map((item) => safeStr(item).trim())
+          .filter(Boolean)
+          .join(", ");
+        if (joined) return joined;
+        continue;
+      }
+
+      const value = safeStr(candidate).trim();
+      if (value) return value;
+    }
+
+    return "";
+  };
+
+  const normalizeClassification = (projectObj: Record<string, unknown>): "internal" | "external" => {
+    const raw = pickFirstString([
+      projectObj.classification,
+      projectObj.projectClassification,
+      projectObj.project_classification,
+      projectObj.type,
+      projectObj.projectType,
+      projectObj.project_type,
+      projectObj.source,
+    ]).toLowerCase();
+
+    return raw.includes("internal") ? "internal" : "external";
+  };
+
   for (const project of projects) {
+    if (typeof project === "string") {
+      const title = safeStr(project).trim();
+      if (title) {
+        externalTitles.push(title);
+      }
+      continue;
+    }
+
     if (!project || typeof project !== "object") continue;
     const projectObj = project as Record<string, unknown>;
 
-    const title = safeStr(projectObj.title).trim();
+    const title = pickFirstString([
+      projectObj.title,
+      projectObj.projectTitle,
+      projectObj.project_title,
+      projectObj.name,
+      projectObj.projectName,
+      projectObj.project_name,
+    ]);
     if (!title) continue;
 
-    const techStackRaw = projectObj.techStack;
-    const techStack = Array.isArray(techStackRaw)
-      ? techStackRaw.map((item) => safeStr(item)).join(", ")
-      : safeStr(techStackRaw).trim();
+    const techStack = normalizeTechStack(projectObj);
+    const classification = normalizeClassification(projectObj);
 
-    const classification = safeStr(projectObj.classification).toLowerCase();
     if (classification === "internal") {
       internalTitles.push(title);
-      if (techStack) internalTechs.push(techStack);
+      if (techStack) {
+        internalTechs.push(techStack);
+      }
     } else {
       externalTitles.push(title);
-      if (techStack) externalTechs.push(techStack);
+      if (techStack) {
+        externalTechs.push(techStack);
+      }
     }
   }
 

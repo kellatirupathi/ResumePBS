@@ -1,5 +1,5 @@
 import axios from "axios";
-import { analyzeTextWithProvider } from "./ai.js";
+import { analyzeTextWithProvider, repairJsonWithProvider } from "./ai.js";
 import { createTempFilePath, cleanupTempFile, downloadAndIdentifyFile, extractTextAndUrlsFromPdf, extractTextFromImage } from "./extraction.js";
 import { SKILL_COLUMNS } from "./constants.js";
 import { calculateSkillProbabilities, classifyAndFormatProjectsFromAi, extractGithubUsername, formatMobileNumber, getHighestEducationInstitute, getLatestExperience, isPresentStr, relaxedJsonLoads, safeStr, sortLinks } from "./utils.js";
@@ -126,18 +126,160 @@ const getComprehensiveDefaultResult = (row: ResumeInputRow, analysisType: Analys
   return result;
 };
 
-const getProjectInstructionBlock = (internalProjectsString: string, analysisType?: AnalysisType): string => {
-  if (internalProjectsString && analysisType !== "Personal Details") {
-    return `
-"projects": Analyze the resume for projects. For each project, extract its title and techStack. CRITICALLY, you must add a "classification" field. Classify a project as "Internal" if its title, description or context matches any project from the OFFICIAL INTERNAL PROJECTS LIST provided below. Otherwise, classify it as "External". Be flexible in your matching (e.g., 'Jobby App' in the list should match 'Jobby-app' or 'Jobby Application' in a resume).
-OFFICIAL INTERNAL PROJECTS LIST: ${internalProjectsString}
-Example Project Entry: { "title": "Jobby App", "techStack": ["React", "JS"], "classification": "Internal" }
+const getProjectInstructionBlock = (): string => {
+  return `
+"projects": [ { "title": "string", "techStack": ["list of tech keywords"], "classification": "Internal" or "External" } ]
 `;
+};
+
+const isWeakExtractedText = (text: string): boolean => {
+  const normalized = safeStr(text);
+  const compactLength = normalized.replace(/\s+/g, "").length;
+  const wordCount = (normalized.match(/[a-zA-Z]{3,}/g) ?? []).length;
+  return compactLength < 600 || wordCount < 40;
+};
+
+const shortlistKeywordBank = [
+  "html",
+  "css",
+  "javascript",
+  "react",
+  "react js",
+  "node",
+  "node js",
+  "sql",
+  "mongodb",
+  "aws",
+  "gcp",
+  "python",
+  "java",
+  "springboot",
+  "django",
+  "cloud",
+  "cloud computing",
+];
+
+const collectRequiredKeywords = (requirements: string): string[] => {
+  const reqLower = safeStr(requirements).toLowerCase();
+  return shortlistKeywordBank.filter((token, idx, arr) => reqLower.includes(token) && arr.indexOf(token) === idx);
+};
+
+const keywordMatch = (text: string, token: string): boolean => {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+};
+
+const extractProjectsWithFocusedPrompt = async (
+  resumeText: string,
+  context: WorkerContext,
+): Promise<Record<string, string> | null> => {
+  const projectPrompt = `
+Extract projects from the resume text and return ONLY valid JSON.
+Return format:
+{
+  "projects": [
+    {
+      "title": "string",
+      "techStack": ["string"],
+      "classification": "Internal" or "External"
+    }
+  ]
+}
+
+Rules:
+- If classification is unclear, use "External".
+- Do not add explanation text outside JSON.
+
+Resume Text:
+---
+${resumeText}
+---
+`;
+
+  try {
+    const aiResponse = await analyzeTextWithProvider(projectPrompt, context.provider, context.apiKey);
+    const data = await parseAiJsonResponse(aiResponse, context.provider, context.apiKey);
+    const classified = classifyAndFormatProjectsFromAi(extractProjectsPayload(data));
+    const internalCount = safeStr(classified["Internal Project Title"]).split(/\r?\n/).filter(Boolean).length;
+    const externalCount = safeStr(classified["External Project Title"]).split(/\r?\n/).filter(Boolean).length;
+
+    return internalCount + externalCount > 0 ? classified : null;
+  } catch {
+    return null;
+  }
+};
+
+const getProjectClassificationBlock = (internalProjectsString: string, analysisType?: AnalysisType): string => {
+  if (!internalProjectsString || analysisType === "Personal Details") {
+    return "If project classification is unclear, default classification to \"External\".";
   }
 
   return `
-"projects": [ { "title": "string", "techStack": ["list of tech keywords"], "classification": "External" } ]
+Use the OFFICIAL INTERNAL PROJECTS LIST below to classify each extracted project:
+- Mark as "Internal" only when the title/description semantically matches a listed internal project.
+- Use flexible matching (punctuation/spacing/wording variants should still match).
+- Mark all non-matching projects as "External".
+OFFICIAL INTERNAL PROJECTS LIST: ${internalProjectsString}
 `;
+};
+
+const extractProjectsPayload = (data: Record<string, unknown>): unknown[] => {
+  const candidates: unknown[] = [
+    data.projects,
+    data.project,
+    data.projectsList,
+    data.project_list,
+    data.projectDetails,
+    data.project_details,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+
+    const obj = candidate as Record<string, unknown>;
+    if (Array.isArray(obj.projects)) {
+      return obj.projects;
+    }
+    if (Array.isArray(obj.items)) {
+      return obj.items;
+    }
+
+    const maybeTitle = safeStr(obj.title ?? obj.projectTitle ?? obj.project_title ?? obj.name ?? obj.projectName).trim();
+    if (maybeTitle) {
+      return [obj];
+    }
+  }
+
+  return [];
+};
+
+const parseAiJsonResponse = async (
+  aiResponse: string,
+  provider: Provider,
+  apiKey: string,
+): Promise<Record<string, unknown>> => {
+  try {
+    return relaxedJsonLoads(aiResponse);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) {
+      throw error;
+    }
+
+    const repaired = await repairJsonWithProvider(aiResponse, provider, apiKey);
+    try {
+      return relaxedJsonLoads(repaired);
+    } catch (repairError) {
+      const firstError = error instanceof Error ? error.message : String(error);
+      const secondError = repairError instanceof Error ? repairError.message : String(repairError);
+      throw new Error(`Could not parse AI JSON. First error: ${firstError}. Repair error: ${secondError}`);
+    }
+  }
 };
 
 const getGithubRepoCount = async (username: string): Promise<string> => {
@@ -168,8 +310,14 @@ const loadResumeText = async (
     }
 
     if (downloaded.fileType === "pdf") {
-      const { text, urls } = await extractTextAndUrlsFromPdf(tempFilePath, enableOcr);
-      return { text, clickableLinks: urls };
+      let extracted = await extractTextAndUrlsFromPdf(tempFilePath, enableOcr);
+
+      // Second pass: force OCR when the first PDF pass yields empty or very weak text.
+      if (enableOcr && (!extracted.text.trim() || isWeakExtractedText(extracted.text))) {
+        extracted = await extractTextAndUrlsFromPdf(tempFilePath, true, { forceOcr: true });
+      }
+
+      return { text: extracted.text, clickableLinks: extracted.urls };
     }
 
     if (downloaded.fileType === "png" || downloaded.fileType === "jpeg") {
@@ -189,9 +337,11 @@ export const processResumeForShortlisting = async (
   context: WorkerContext,
 ): Promise<RowResult> => {
   const result = defaultShortlistResult(row, context.companyName);
+  let resumeText = "";
 
   try {
-    const { text: resumeText } = await loadResumeText(row["Resume link"], context.enableOcr);
+    const loaded = await loadResumeText(row["Resume link"], context.enableOcr);
+    resumeText = loaded.text;
 
     if (!resumeText.trim()) {
       throw new Error("Could not extract any text from the file.");
@@ -206,7 +356,8 @@ export const processResumeForShortlisting = async (
         "\n\n[SYSTEM WARNING]: The user explicitly requires 'Java' (the backend language). I have scanned the text and 'Java' appears to be MISSING as a standalone word. The text might contain 'JavaScript', but THAT IS NOT JAVA. Treat 'Java' as MISSING.";
     }
 
-    const projectInstructionBlock = getProjectInstructionBlock(context.internalProjectsString);
+    const projectInstructionBlock = getProjectInstructionBlock();
+    const projectClassificationBlock = getProjectClassificationBlock(context.internalProjectsString);
 
     const prompt = `
 You are a Nuanced Technical Recruiter and Logic Engine.
@@ -258,6 +409,9 @@ Return your answer as a **single, pure JSON object**.
   ${projectInstructionBlock}
 }
 
+**PROJECT CLASSIFICATION RULES:**
+${projectClassificationBlock}
+
 ---
 **Required Criteria:**
 ${context.userRequirements}
@@ -268,7 +422,7 @@ ${resumeText}
 `;
 
     const aiResponse = await analyzeTextWithProvider(prompt, context.provider, context.apiKey);
-    const data = relaxedJsonLoads(aiResponse);
+    const data = await parseAiJsonResponse(aiResponse, context.provider, context.apiKey);
 
     if (typeof data !== "object" || Array.isArray(data)) {
       throw new Error(`AI returned data that is not a JSON object. Type: ${typeof data}`);
@@ -289,19 +443,53 @@ ${resumeText}
     result["Experience Remarks"] = safeStr(data.experience_remarks ?? "N/A");
     result["Other Remarks"] = safeStr(data.other_remarks ?? "N/A");
 
-    const classified = classifyAndFormatProjectsFromAi(data.projects ?? []);
-    Object.assign(result, classified);
+    let classified = classifyAndFormatProjectsFromAi(extractProjectsPayload(data));
+    let internalTitles = safeStr(classified["Internal Project Title"]);
+    let externalTitles = safeStr(classified["External Project Title"]);
+    let internalCount = internalTitles ? internalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+    let externalCount = externalTitles ? externalTitles.split(/\r?\n/).filter(Boolean).length : 0;
 
-    const internalTitles = safeStr(classified["Internal Project Title"]);
-    const externalTitles = safeStr(classified["External Project Title"]);
-    const internalCount = internalTitles ? internalTitles.split(/\r?\n/).filter(Boolean).length : 0;
-    const externalCount = externalTitles ? externalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+    if (internalCount + externalCount === 0) {
+      const fallbackClassified = await extractProjectsWithFocusedPrompt(resumeText, context);
+      if (fallbackClassified) {
+        classified = fallbackClassified;
+        internalTitles = safeStr(classified["Internal Project Title"]);
+        externalTitles = safeStr(classified["External Project Title"]);
+        internalCount = internalTitles ? internalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+        externalCount = externalTitles ? externalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+      }
+    }
+
+    Object.assign(result, classified);
 
     result["Internal Projects Count"] = internalCount;
     result["External Projects Count"] = externalCount;
     result["Total Projects Count"] = internalCount + externalCount;
+
+    const isErrorRemark = safeStr(result["Overall Remarks"]).toLowerCase().startsWith("error:");
+    const overallProbability = Number(result["Overall Probability"] ?? 0);
+    if (!isErrorRemark && overallProbability <= 0) {
+      const requiredKeywords = collectRequiredKeywords(context.userRequirements);
+      if (requiredKeywords.length > 0) {
+        const matchedKeywords = requiredKeywords.filter((token) => keywordMatch(resumeText, token));
+        if (matchedKeywords.length > 0) {
+          const coverage = matchedKeywords.length / requiredKeywords.length;
+          const adjustedOverall = Math.max(35, Math.min(74, Math.round(coverage * 100)));
+          result["Overall Probability"] = adjustedOverall;
+          if (Number(result["Skills Probability"] ?? 0) <= 0) {
+            result["Skills Probability"] = Math.max(30, Math.round(adjustedOverall * 0.8));
+          }
+          result["Overall Remarks"] = `${safeStr(result["Overall Remarks"])} | System adjustment: ${matchedKeywords.length}/${requiredKeywords.length} required keywords detected in resume text (${matchedKeywords.join(", ")}).`;
+        }
+      }
+    }
   } catch (error) {
-    result["Overall Remarks"] = `Error: ${error instanceof Error ? error.message : String(error)}`;
+    const errorText = `Error: ${error instanceof Error ? error.message : String(error)}`;
+    result["Overall Remarks"] = errorText;
+    result["Projects Remarks"] = errorText;
+    result["Skills Remarks"] = errorText;
+    result["Experience Remarks"] = errorText;
+    result["Other Remarks"] = errorText;
   }
 
   return result;
@@ -314,15 +502,20 @@ export const processResumeComprehensively = async (
 ): Promise<RowResult> => {
   const result = getComprehensiveDefaultResult(row, context.analysisType, context.companyName);
   let aiResponseForDebug = "";
+  let resumeText = "";
+  let clickableLinks: string[] = [];
 
   try {
-    const { text: resumeText, clickableLinks } = await loadResumeText(row["Resume link"], context.enableOcr);
+    const loaded = await loadResumeText(row["Resume link"], context.enableOcr);
+    resumeText = loaded.text;
+    clickableLinks = loaded.clickableLinks;
 
     if (!resumeText.trim()) {
       throw new Error("Could not extract any text from the file.");
     }
 
-    const projectInstructionBlock = getProjectInstructionBlock(context.internalProjectsString, context.analysisType);
+    const projectInstructionBlock = getProjectInstructionBlock();
+    const projectClassificationBlock = getProjectClassificationBlock(context.internalProjectsString, context.analysisType);
 
     let prompt = "";
 
@@ -404,8 +597,8 @@ You are a machine that strictly outputs a single, valid JSON object. Analyze the
   "experience": [ { "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string or list of strings" } ]
 }
 
-**CRITICAL NOTE ON PROJECTS:**
-Refer to the "projects" instruction above. You MUST use the OFFICIAL INTERNAL PROJECTS LIST to classify projects correctly.
+**PROJECT CLASSIFICATION RULES:**
+${projectClassificationBlock}
 
 Resume Text:
 ---
@@ -433,8 +626,8 @@ You are an expert data extractor. Analyze the resume and produce a single JSON o
   "experience": [{ "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string"}]
 }
 
-**CRITICAL NOTE ON PROJECTS:**
-Refer to the "projects" instruction above. You MUST use the OFFICIAL INTERNAL PROJECTS LIST to classify projects correctly.
+**PROJECT CLASSIFICATION RULES:**
+${projectClassificationBlock}
 
 Resume Text:
 ---
@@ -445,7 +638,7 @@ ${resumeText}
 
     const aiResponse = await analyzeTextWithProvider(prompt, context.provider, context.apiKey);
     aiResponseForDebug = aiResponse;
-    const data = relaxedJsonLoads(aiResponse);
+    const data = await parseAiJsonResponse(aiResponse, context.provider, context.apiKey);
 
     if (typeof data !== "object" || Array.isArray(data)) {
       throw new Error(`AI returned non-dict data. Type: ${typeof data}`);
@@ -454,14 +647,24 @@ ${resumeText}
       throw new Error(safeStr(data.error));
     }
 
-    const classifiedProjects = classifyAndFormatProjectsFromAi(data.projects ?? []);
+    let classifiedProjects = classifyAndFormatProjectsFromAi(extractProjectsPayload(data));
+    let internalTitles = safeStr(classifiedProjects["Internal Project Title"]);
+    let externalTitles = safeStr(classifiedProjects["External Project Title"]);
+    let internalCount = internalTitles ? internalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+    let externalCount = externalTitles ? externalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+
+    if (internalCount + externalCount === 0 && context.analysisType !== "Personal Details") {
+      const fallbackClassified = await extractProjectsWithFocusedPrompt(resumeText, context);
+      if (fallbackClassified) {
+        classifiedProjects = fallbackClassified;
+        internalTitles = safeStr(classifiedProjects["Internal Project Title"]);
+        externalTitles = safeStr(classifiedProjects["External Project Title"]);
+        internalCount = internalTitles ? internalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+        externalCount = externalTitles ? externalTitles.split(/\r?\n/).filter(Boolean).length : 0;
+      }
+    }
 
     if (context.analysisType === "Internal Projects Matching") {
-      const internalTitles = safeStr(classifiedProjects["Internal Project Title"]);
-      const externalTitles = safeStr(classifiedProjects["External Project Title"]);
-      const internalCount = internalTitles ? internalTitles.split(/\r?\n/).filter(Boolean).length : 0;
-      const externalCount = externalTitles ? externalTitles.split(/\r?\n/).filter(Boolean).length : 0;
-
       result["Total Projects Count"] = internalCount + externalCount;
       result["Internal Projects Count"] = internalCount;
       result["External Projects Count"] = externalCount;
@@ -471,6 +674,9 @@ ${resumeText}
       result["External Project Techstacks"] = safeStr(classifiedProjects["External Projects Techstacks"]);
     } else {
       Object.assign(result, classifiedProjects);
+      result["Internal Projects Count"] = internalCount;
+      result["External Projects Count"] = externalCount;
+      result["Total Projects Count"] = internalCount + externalCount;
 
       if (["All Data", "Personal Details"].includes(context.analysisType)) {
         const address = typeof data.address === "object" && data.address !== null ? (data.address as Record<string, unknown>) : {};
@@ -584,7 +790,7 @@ ${resumeText}
       result["Full Name"] = displayError;
     }
 
-    if (error instanceof SyntaxError) {
+    if (error instanceof SyntaxError || safeStr(error instanceof Error ? error.message : error).includes("Could not parse AI JSON")) {
       console.debug("Malformed AI response", aiResponseForDebug);
     }
   }

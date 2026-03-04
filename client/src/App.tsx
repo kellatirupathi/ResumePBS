@@ -38,6 +38,20 @@ const rightPanelScale = 0.9;
 const analysisOptions: AnalysisType[] = ["All Data", "Personal Details", "Skills & Projects", "Internal Projects Matching"];
 const shortlistingOptions: ShortlistingMode[] = ["Probability Wise (Default)", "Priority Wise (P1 / P2 / P3 Bands)"];
 
+const getRecommendedConcurrency = (provider: Provider, config: ServerConfig | null): number => {
+  if (provider === "OpenAI") {
+    return 12;
+  }
+  return Math.max(1, Math.min(20, config?.mistralKeyCount || 1));
+};
+
+const getMaxConcurrency = (provider: Provider, _config: ServerConfig | null): number => {
+  if (provider === "OpenAI") {
+    return 20;
+  }
+  return 20;
+};
+
 const formatElapsedDuration = (milliseconds: number): string => {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -119,8 +133,13 @@ const App = () => {
 
   useEffect(() => {
     if (!serverConfig) return;
-    const recommended = provider === "OpenAI" ? 12 : Math.max(1, Math.min(20, serverConfig.mistralKeyCount || 1));
+    const recommended = getRecommendedConcurrency(provider, serverConfig);
     setConcurrency(recommended);
+  }, [provider, serverConfig]);
+
+  useEffect(() => {
+    const maxAllowed = getMaxConcurrency(provider, serverConfig);
+    setConcurrency((prev) => Math.min(prev, maxAllowed));
   }, [provider, serverConfig]);
 
   useEffect(() => {
@@ -213,13 +232,18 @@ const App = () => {
 
   const gridColumns = useMemo(() => toGridColumns(sortedOutput.columns), [sortedOutput.columns]);
 
+  const liveRows = useMemo(() => {
+    if (!job) return [] as TableRow[];
+    return (job.liveResults.length > 0 ? job.liveResults : job.results) as TableRow[];
+  }, [job]);
+
   const liveGridRows = useMemo(
     () =>
-      sortedOutput.rows.map((row, index) => ({
+      liveRows.map((row, index) => ({
         id: `${index + 1}-${String(row["User ID"] ?? "")}`,
         ...row,
       })),
-    [sortedOutput.rows],
+    [liveRows],
   );
 
   const filteredGridRows = useMemo(
@@ -295,7 +319,24 @@ const App = () => {
     URL.revokeObjectURL(href);
   };
 
+  const handleDownloadLiveFull = async () => {
+    if (!jobId) return;
+
+    const url = buildDownloadUrl(jobId, {});
+    const response = await fetch(url);
+    const blob = await response.blob();
+
+    const link = document.createElement("a");
+    const href = URL.createObjectURL(blob);
+    link.href = href;
+    link.download = job?.fileName ?? "results.csv";
+    link.click();
+    URL.revokeObjectURL(href);
+  };
+
   const canStart = Boolean(companyName.trim()) && !providerMissingKey && (inputMethod === "csv" ? Boolean(csvFile) : Boolean(pastedText.trim()));
+  const maxConcurrency = getMaxConcurrency(provider, serverConfig);
+  const recommendedConcurrency = getRecommendedConcurrency(provider, serverConfig);
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "#f4f5f7" }}>
@@ -340,7 +381,7 @@ const App = () => {
             </Typography>
             <Slider
               min={1}
-              max={20}
+              max={maxConcurrency}
               step={1}
               value={concurrency}
               onChange={(_, value) => setConcurrency(Array.isArray(value) ? value[0] : value)}
@@ -348,7 +389,7 @@ const App = () => {
             />
               <Typography variant="caption" sx={{ color: "#94a3b8" }}>
               {provider === "OpenAI"
-                ? "OpenAI default concurrency is set to 12."
+                ? `Loaded ${serverConfig?.openAiKeyCount ?? 0} OpenAI key(s). Recommended concurrency is ${recommendedConcurrency} for stable runs.`
                 : `Loaded ${serverConfig?.mistralKeyCount ?? 0} Mistral key(s). Recommended concurrency follows loaded key count.`}
             </Typography>
           </Box>
@@ -534,8 +575,8 @@ const App = () => {
                   Elapsed: {elapsedLabel}
                 </Typography>
                 {job.status === "completed" ? (
-                  <Button variant="outlined" onClick={handleDownloadFiltered}>
-                    Download Filtered Results
+                  <Button variant="outlined" onClick={handleDownloadLiveFull}>
+                    Download Full Live Data
                   </Button>
                 ) : null}
               </Stack>

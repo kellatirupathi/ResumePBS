@@ -12,11 +12,17 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
 const REQUEST_TIMEOUT_MS = 60_000;
+const OCR_MIN_TEXT_CHARS = 600;
+const OCR_MIN_WORD_TOKENS = 40;
 
 export interface DownloadResult {
   success: boolean;
   pathOrError: string;
   fileType: "pdf" | "png" | "jpeg" | "unsupported" | "error";
+}
+
+interface PdfExtractionOptions {
+  forceOcr?: boolean;
 }
 
 export const isOcrAvailable = (): boolean => {
@@ -154,7 +160,8 @@ const extractUrlsFromText = (text: string): string[] => {
 export const extractUrlsFromPdfAnnotations = async (pdfPath: string): Promise<string[]> => {
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const data = await fs.readFile(pdfPath);
+    const fileBuffer = await fs.readFile(pdfPath);
+    const data = new Uint8Array(fileBuffer);
     const doc = await pdfjs.getDocument({ data }).promise;
 
     const links = new Set<string>();
@@ -182,7 +189,8 @@ const ocrImageBuffer = async (image: Buffer): Promise<string> => {
 const extractTextFromPdfWithPdfJs = async (pdfPath: string): Promise<string> => {
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const data = await fs.readFile(pdfPath);
+    const fileBuffer = await fs.readFile(pdfPath);
+    const data = new Uint8Array(fileBuffer);
     const doc = await pdfjs.getDocument({ data }).promise;
 
     const chunks: string[] = [];
@@ -202,26 +210,43 @@ const extractTextFromPdfWithPdfJs = async (pdfPath: string): Promise<string> => 
 const ocrPdfWithRendering = async (pdfPath: string): Promise<string> => {
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const data = await fs.readFile(pdfPath);
+    const fileBuffer = await fs.readFile(pdfPath);
+    const data = new Uint8Array(fileBuffer);
     const doc = await pdfjs.getDocument({ data }).promise;
     const chunks: string[] = [];
+    const scales = [3.0, 2.4, 2.0, 1.6];
 
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
-      const page = await doc.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: 2.0 });
+      let pageOcrText = "";
 
-      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-      const context = canvas.getContext("2d");
+      for (const scale of scales) {
+        try {
+          const page = await doc.getPage(pageNumber);
+          const viewport = page.getViewport({ scale });
 
-      await page.render({
-        canvas: canvas as unknown as HTMLCanvasElement,
-        canvasContext: context as unknown as CanvasRenderingContext2D,
-        viewport,
-      }).promise;
+          const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+          const context = canvas.getContext("2d");
 
-      const pngBuffer = canvas.toBuffer("image/png");
-      const ocrText = await ocrImageBuffer(pngBuffer);
-      chunks.push(ocrText);
+          await page.render({
+            canvas: canvas as unknown as HTMLCanvasElement,
+            canvasContext: context as unknown as CanvasRenderingContext2D,
+            viewport,
+          }).promise;
+
+          const pngBuffer = canvas.toBuffer("image/png");
+          const ocrText = safeStr(await ocrImageBuffer(pngBuffer)).trim();
+          if (ocrText) {
+            pageOcrText = ocrText;
+            break;
+          }
+        } catch {
+          // Try a different scale for this page.
+        }
+      }
+
+      if (pageOcrText) {
+        chunks.push(pageOcrText);
+      }
     }
 
     return chunks.join("\n");
@@ -230,9 +255,20 @@ const ocrPdfWithRendering = async (pdfPath: string): Promise<string> => {
   }
 };
 
+const shouldRunOcr = (text: string, forceOcr: boolean): boolean => {
+  if (forceOcr) return true;
+
+  const normalized = safeStr(text);
+  const compactTextLength = normalized.replace(/\s+/g, "").length;
+  const wordTokenCount = (normalized.match(/[a-zA-Z]{3,}/g) ?? []).length;
+
+  return compactTextLength < OCR_MIN_TEXT_CHARS || wordTokenCount < OCR_MIN_WORD_TOKENS;
+};
+
 export const extractTextAndUrlsFromPdf = async (
   pdfPath: string,
   enableOcr: boolean,
+  options: PdfExtractionOptions = {},
 ): Promise<{ text: string; urls: string[] }> => {
   let text = "";
 
@@ -248,8 +284,12 @@ export const extractTextAndUrlsFromPdf = async (
     text = await extractTextFromPdfWithPdfJs(pdfPath);
   }
 
-  if (!text.trim() && enableOcr) {
-    text = await ocrPdfWithRendering(pdfPath);
+  if (enableOcr && shouldRunOcr(text, Boolean(options.forceOcr))) {
+    const ocrText = await ocrPdfWithRendering(pdfPath);
+    if (ocrText.trim()) {
+      const uniqueParts = Array.from(new Set([text.trim(), ocrText.trim()].filter(Boolean)));
+      text = uniqueParts.join("\n");
+    }
   }
 
   const annotationUrls = await extractUrlsFromPdfAnnotations(pdfPath);

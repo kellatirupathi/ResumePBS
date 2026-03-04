@@ -9,6 +9,9 @@ import { writeResultsToGoogleSheets } from "./sheets.js";
 
 const jobs = new Map<string, JobRecord>();
 
+const compactLiveResults = (job: JobRecord): RowResult[] =>
+  job.liveResultSlots.filter((row): row is RowResult => row !== null);
+
 const normalizeRows = (rows: ResumeInputRow[]): ResumeInputRow[] => {
   return rows
     .map((row) => ({ user_id: String(row.user_id ?? "").trim(), "Resume link": String(row["Resume link"] ?? "").trim() }))
@@ -54,7 +57,7 @@ export const parsePastedRows = (pastedText: string): ResumeInputRow[] => {
 
 const getActiveKeys = (provider: Provider): string[] => {
   if (provider === "OpenAI") {
-    return config.openAiApiKey ? [config.openAiApiKey] : [];
+    return config.openAiApiKeys;
   }
   return config.mistralApiKeys;
 };
@@ -127,12 +130,13 @@ const processJob = async (job: JobRecord): Promise<void> => {
       }
 
       result["Analysis Datetime"] = nowTimestamp();
-      job.results.push(result);
+      job.liveResultSlots[index] = result;
       job.completed += 1;
     });
 
     const mode = isShortlisting ? "shortlisting" : job.payload.analysisType;
-    const ordered = orderAndSelectColumns(job.results, mode, job.payload.shortlistingMode);
+    const completedRows = compactLiveResults(job);
+    const ordered = orderAndSelectColumns(completedRows, mode, job.payload.shortlistingMode);
     job.results = ordered.rows;
     job.fileName = ordered.fileName;
 
@@ -146,6 +150,7 @@ const processJob = async (job: JobRecord): Promise<void> => {
   } catch (error) {
     job.status = "failed";
     job.finishedAt = new Date().toISOString();
+    job.results = compactLiveResults(job);
     job.errors.push(error instanceof Error ? error.message : String(error));
   }
 };
@@ -162,6 +167,7 @@ export const createJob = (payload: JobCreatePayload, rows: ResumeInputRow[]): Jo
     total: normalizedRows.length,
     completed: 0,
     results: [],
+    liveResultSlots: Array.from({ length: normalizedRows.length }, () => null),
     errors: [],
     warnings: [],
     fileName: "results.csv",
@@ -175,35 +181,62 @@ export const createJob = (payload: JobCreatePayload, rows: ResumeInputRow[]): Jo
 
 export const getJob = (jobId: string): JobRecord | undefined => jobs.get(jobId);
 
-export const serializeJob = (job: JobRecord) => ({
-  id: job.id,
-  status: job.status,
-  total: job.total,
-  completed: job.completed,
-  progress: job.total > 0 ? job.completed / job.total : 0,
-  payload: job.payload,
-  warnings: job.warnings,
-  errors: job.errors,
-  startedAt: job.startedAt,
-  finishedAt: job.finishedAt,
-  results: job.results,
-  fileName: job.fileName,
-});
+export const serializeJob = (job: JobRecord) => {
+  const liveResults = compactLiveResults(job);
+
+  return {
+    id: job.id,
+    status: job.status,
+    total: job.total,
+    completed: job.completed,
+    progress: job.total > 0 ? job.completed / job.total : 0,
+    payload: job.payload,
+    warnings: job.warnings,
+    errors: job.errors,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    liveResults,
+    results: job.status === "completed" ? job.results : liveResults,
+    fileName: job.fileName,
+  };
+};
 
 export const getJobResults = (jobId: string): RowResult[] => {
   const job = jobs.get(jobId);
   if (!job) return [];
-  return job.results;
+  return job.status === "completed" ? job.results : compactLiveResults(job);
 };
+
+const hasActiveFilters = (filters: FilterQuery): boolean =>
+  Boolean(
+    (filters.priorityBands && filters.priorityBands.length > 0) ||
+      filters.searchTerm ||
+      filters.overallMin !== undefined ||
+      filters.overallMax !== undefined ||
+      filters.skillsMin !== undefined ||
+      filters.skillsMax !== undefined ||
+      filters.expMin !== undefined ||
+      filters.expMax !== undefined ||
+      filters.projectsMin !== undefined ||
+      filters.projectsMax !== undefined ||
+      filters.otherMin !== undefined ||
+      filters.otherMax !== undefined ||
+      filters.onlyInternal ||
+      filters.onlyExternal ||
+      filters.minTotalProjects !== undefined ||
+      filters.minInternalProjects !== undefined ||
+      filters.minExternalProjects !== undefined,
+  );
 
 export const getFilteredCsv = (jobId: string, filters: FilterQuery): { buffer: Buffer; fileName: string } | null => {
   const job = jobs.get(jobId);
   if (!job) return null;
 
-  const filteredRows = applyFilters(job.results, filters);
-  const columns = filteredRows.length > 0 ? Object.keys(filteredRows[0]) : Object.keys(job.results[0] ?? {});
-  const buffer = toCsvBuffer(filteredRows, columns);
-  const fileName = job.fileName.startsWith("filtered_") ? job.fileName : `filtered_${job.fileName}`;
+  const filtered = hasActiveFilters(filters);
+  const rows = filtered ? applyFilters(job.results, filters) : job.results;
+  const columns = rows.length > 0 ? Object.keys(rows[0]) : Object.keys(job.results[0] ?? {});
+  const buffer = toCsvBuffer(rows, columns);
+  const fileName = filtered && !job.fileName.startsWith("filtered_") ? `filtered_${job.fileName}` : job.fileName;
 
   return { buffer, fileName };
 };

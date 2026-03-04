@@ -6,9 +6,48 @@ import { safeStr } from "./utils.js";
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const jitterMs = (): number => 500 + Math.floor(Math.random() * 2000);
 
-const systemPrompt =
+const analysisSystemPrompt =
   "You are an expert resume parser and data analyst. Always return STRICT JSON only-" +
   'no markdown fences, no commentary. Fill missing values with empty strings "" or [] where appropriate.';
+
+const repairSystemPrompt =
+  "You are a strict JSON repair engine. Return only valid JSON with the same meaning as input. " +
+  "Do not add commentary, markdown, or extra keys.";
+
+interface RequestOptions {
+  systemPrompt: string;
+  temperature: number;
+  maxTokens: number;
+}
+
+const DEFAULT_REQUEST_OPTIONS: RequestOptions = {
+  systemPrompt: analysisSystemPrompt,
+  temperature: 0.1,
+  maxTokens: 6144,
+};
+
+const REPAIR_REQUEST_OPTIONS: RequestOptions = {
+  systemPrompt: repairSystemPrompt,
+  temperature: 0,
+  maxTokens: 6144,
+};
+
+const extractResponseContent = (content: unknown): string => {
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return safeStr(part);
+        if (part && typeof part === "object") {
+          return safeStr((part as Record<string, unknown>).text);
+        }
+        return "";
+      })
+      .join("")
+      .trim();
+  }
+
+  return safeStr(content).trim();
+};
 
 const requestWithRetries = async (
   endpoint: string,
@@ -16,11 +55,13 @@ const requestWithRetries = async (
   model: string,
   prompt: string,
   providerLabel: "OpenAI" | "Mistral",
+  options: Partial<RequestOptions> = {},
 ): Promise<string> => {
   if (!apiKey) {
     return JSON.stringify({ error: `Missing ${providerLabel} API key for this request.` });
   }
 
+  const effectiveOptions: RequestOptions = { ...DEFAULT_REQUEST_OPTIONS, ...options };
   const attempts = 5;
   const initialBackoffSeconds = 5;
 
@@ -32,11 +73,11 @@ const requestWithRetries = async (
   const payload = {
     model,
     messages: [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: effectiveOptions.systemPrompt },
       { role: "user", content: prompt },
     ],
-    temperature: 0.1,
-    max_tokens: 4096,
+    temperature: effectiveOptions.temperature,
+    max_tokens: effectiveOptions.maxTokens,
   };
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -51,21 +92,7 @@ const requestWithRetries = async (
 
       if (response.status === 200) {
         const content = response.data?.choices?.[0]?.message?.content;
-
-        if (Array.isArray(content)) {
-          return content
-            .map((part) => {
-              if (typeof part === "string") return safeStr(part);
-              if (part && typeof part === "object") {
-                return safeStr((part as Record<string, unknown>).text);
-              }
-              return "";
-            })
-            .join("")
-            .trim();
-        }
-
-        return safeStr(content).trim();
+        return extractResponseContent(content);
       }
 
       if (response.status === 429 || [500, 502, 503, 504].includes(response.status)) {
@@ -114,4 +141,52 @@ export const analyzeTextWithProvider = async (
     return analyzeTextWithOpenAi(prompt, apiKey);
   }
   return analyzeTextWithMistral(prompt, apiKey);
+};
+
+const buildRepairPrompt = (rawJson: string): string => {
+  const maxChars = 20_000;
+  const payload = safeStr(rawJson).slice(0, maxChars);
+  return `
+Fix the JSON below so that it is syntactically valid JSON.
+Rules:
+1) Return only JSON.
+2) Preserve keys and values as much as possible.
+3) Do not invent information.
+
+BROKEN_JSON:
+${payload}
+`;
+};
+
+export const repairJsonWithMistral = async (rawJson: string, apiKey: string): Promise<string> => {
+  return requestWithRetries(
+    MISTRAL_ENDPOINT,
+    apiKey,
+    MISTRAL_MODEL,
+    buildRepairPrompt(rawJson),
+    "Mistral",
+    REPAIR_REQUEST_OPTIONS,
+  );
+};
+
+export const repairJsonWithOpenAi = async (rawJson: string, apiKey: string): Promise<string> => {
+  return requestWithRetries(
+    OPENAI_ENDPOINT,
+    apiKey,
+    OPENAI_MODEL,
+    buildRepairPrompt(rawJson),
+    "OpenAI",
+    REPAIR_REQUEST_OPTIONS,
+  );
+};
+
+export const repairJsonWithProvider = async (
+  rawJson: string,
+  provider: string,
+  apiKey: string,
+): Promise<string> => {
+  if (safeStr(provider).toLowerCase() === "openai") {
+    return repairJsonWithOpenAi(rawJson, apiKey);
+  }
+  return repairJsonWithMistral(rawJson, apiKey);
 };

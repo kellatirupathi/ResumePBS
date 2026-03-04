@@ -5,6 +5,7 @@ export type ShortlistingMode = "Probability Wise (Default)" | "Priority Wise (P1
 
 export interface ServerConfig {
   hasOpenAiKey: boolean;
+  openAiKeyCount: number;
   hasMistralKeys: boolean;
   mistralKeyCount: number;
   hasGoogleServiceAccount: boolean;
@@ -32,6 +33,7 @@ export interface JobStatusResponse {
   errors: string[];
   startedAt?: string;
   finishedAt?: string;
+  liveResults: Array<Record<string, string | number | boolean | null>>;
   results: Array<Record<string, string | number | boolean | null>>;
   fileName: string;
 }

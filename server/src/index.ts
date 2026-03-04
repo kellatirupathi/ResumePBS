@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import morgan from "morgan";
 import multer from "multer";
-import { config, getProviderConfig } from "./config.js";
+import { config, getProviderConcurrencyCap, getProviderConfig, getRecommendedConcurrency } from "./config.js";
 import { ANALYSIS_TYPES, SHORTLISTING_MODES } from "./constants.js";
 import { createJob, getFilteredCsv, getJob, getJobResults, parseCsvRows, parsePastedRows, serializeJob } from "./jobs.js";
 import type { AnalysisType, FilterQuery, InputMethod, JobCreatePayload, Provider, ShortlistingMode } from "./types.js";
@@ -98,10 +98,6 @@ app.post("/api/jobs", upload.single("csvFile"), (req, res) => {
       return res.status(400).json({ error: `shortlistingMode must be one of: ${SHORTLISTING_MODES.join(", ")}` });
     }
 
-    const defaultConcurrency = provider === "OpenAI" ? 12 : 1;
-    const concurrency = Math.max(1, Math.min(20, parseNumber(req.body.concurrency, defaultConcurrency)));
-    const enableOcr = parseBoolean(req.body.enableOcr, true);
-
     const providerConfig = getProviderConfig(isOcrAvailable());
     if (provider === "OpenAI" && !providerConfig.hasOpenAiKey) {
       return res.status(400).json({ error: "OPENAI_API_KEY not configured." });
@@ -109,6 +105,11 @@ app.post("/api/jobs", upload.single("csvFile"), (req, res) => {
     if (provider === "Mistral" && !providerConfig.hasMistralKeys) {
       return res.status(400).json({ error: "MISTRAL_API_KEY_1..12 or MISTRAL_API_KEY not configured." });
     }
+
+    const defaultConcurrency = getRecommendedConcurrency(provider);
+    const concurrencyCap = getProviderConcurrencyCap(provider);
+    const concurrency = Math.max(1, Math.min(concurrencyCap, parseNumber(req.body.concurrency, defaultConcurrency)));
+    const enableOcr = parseBoolean(req.body.enableOcr, true);
 
     let rows;
     if (inputMethod === "csv") {

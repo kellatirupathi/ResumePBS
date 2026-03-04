@@ -36,6 +36,7 @@ export interface JobRecord {
   total: number;
   completed: number;
   results: RowResult[];
+  liveResultSlots: Array<RowResult | null>;
   errors: string[];
   warnings: string[];
   startedAt?: string;
@@ -65,6 +66,7 @@ export interface FilterQuery {
 
 export interface ProviderConfig {
   hasOpenAiKey: boolean;
+  openAiKeyCount: number;
   hasMistralKeys: boolean;
   mistralKeyCount: number;
   hasGoogleServiceAccount: boolean;
