@@ -19,6 +19,21 @@ const envDirectory = resolvedEnvPath ? path.dirname(resolvedEnvPath) : "";
 
 const getEnv = (key: string): string => process.env[key]?.trim() ?? "";
 
+const resolvePathFromCandidates = (filePath: string): string => {
+  const normalized = filePath.trim();
+  if (!normalized) return "";
+
+  const candidatePaths = [
+    path.isAbsolute(normalized) ? normalized : "",
+    envDirectory ? path.resolve(envDirectory, normalized) : "",
+    path.resolve(process.cwd(), normalized),
+    path.resolve(process.cwd(), "..", normalized),
+  ].filter(Boolean);
+
+  const resolved = candidatePaths.find((candidate) => fs.existsSync(candidate));
+  return resolved ?? "";
+};
+
 const getMistralKeys = (): string[] => {
   const numbered = Array.from({ length: 12 }, (_, idx) => getEnv(`MISTRAL_API_KEY_${idx + 1}`)).filter(Boolean);
   if (numbered.length > 0) {
@@ -38,6 +53,13 @@ const getOpenAiKeys = (): string[] => {
 };
 
 const openAiApiKeys = getOpenAiKeys();
+const bigQueryProjectId = getEnv("BIGQUERY_PROJECT_ID") || "kossip-helpers";
+const bigQueryDatasetId = getEnv("BIGQUERY_DATASET_ID") || "placement_support_analytics";
+const bigQueryStoreDatasetId = getEnv("BIGQUERY_STORE_DATASET_ID") || getEnv("STORE_DATASET_ID") || "ps_interview_intel";
+const bigQueryStoreTableId = getEnv("BIGQUERY_STORE_TABLE_ID") || getEnv("STORE_TABLE_ID") || "resume_job_matcher_tool_logs";
+const bigQueryUserIdColumn = getEnv("BIGQUERY_USER_ID_COLUMN") || "user_id";
+const configuredBigQueryServicePath = getEnv("BIGQUERY_SERVICE_ACCOUNT_PATH");
+const defaultBigQueryServicePath = "kossip-helpers-fb18bd11f754.json";
 
 export const config = {
   port: Number(getEnv("PORT") || 4000),
@@ -46,6 +68,14 @@ export const config = {
   mistralApiKeys: getMistralKeys(),
   googleServiceAccountJson: getEnv("GOOGLE_SERVICE_ACCOUNT_JSON"),
   googleServiceAccountPath: getEnv("GOOGLE_SERVICE_ACCOUNT_PATH"),
+  bigQueryProjectId,
+  bigQueryDatasetId,
+  bigQueryStoreDatasetId,
+  bigQueryStoreTableId,
+  bigQueryUserIdColumn,
+  bigQueryServiceAccountPath:
+    resolvePathFromCandidates(configuredBigQueryServicePath) ||
+    resolvePathFromCandidates(defaultBigQueryServicePath),
   internalProjectListPath: path.resolve(__dirname, "..", "resources", "INTERNAL_PROJECT_LIST.txt"),
 };
 
@@ -90,13 +120,7 @@ export const loadGoogleServiceAccount = (): Record<string, unknown> | null => {
     }
 
     if (config.googleServiceAccountPath) {
-      const candidatePaths = [
-        envDirectory ? path.resolve(envDirectory, config.googleServiceAccountPath) : "",
-        path.resolve(process.cwd(), config.googleServiceAccountPath),
-        path.resolve(process.cwd(), "..", config.googleServiceAccountPath),
-      ].filter(Boolean);
-
-      const resolvedPath = candidatePaths.find((candidate) => fs.existsSync(candidate));
+      const resolvedPath = resolvePathFromCandidates(config.googleServiceAccountPath);
       if (!resolvedPath) {
         return null;
       }

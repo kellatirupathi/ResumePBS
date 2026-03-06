@@ -111,6 +111,7 @@ const processJob = async (job: JobRecord): Promise<void> => {
           companyName: job.payload.companyName,
           userRequirements: job.payload.userRequirements,
           analysisType: job.payload.analysisType,
+          shortlistingMode: job.payload.shortlistingMode,
           internalProjectsString,
         });
 
@@ -125,6 +126,7 @@ const processJob = async (job: JobRecord): Promise<void> => {
           companyName: job.payload.companyName,
           userRequirements: job.payload.userRequirements,
           analysisType: job.payload.analysisType,
+          shortlistingMode: job.payload.shortlistingMode,
           internalProjectsString,
         });
       }

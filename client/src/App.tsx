@@ -36,7 +36,7 @@ const drawerWidth = 320;
 const rightPanelScale = 0.9;
 
 const analysisOptions: AnalysisType[] = ["All Data", "Personal Details", "Skills & Projects", "Internal Projects Matching"];
-const shortlistingOptions: ShortlistingMode[] = ["Probability Wise (Default)", "Priority Wise (P1 / P2 / P3 Bands)"];
+const shortlistingOptions: ShortlistingMode[] = ["Probability Wise (Default)", "Priority Wise (P1 / P2 / P3 Bands)", "Sectionwise"];
 
 const getRecommendedConcurrency = (provider: Provider, config: ServerConfig | null): number => {
   if (provider === "OpenAI") {
@@ -260,11 +260,11 @@ const App = () => {
     return provider === "OpenAI" ? !serverConfig.hasOpenAiKey : !serverConfig.hasMistralKeys;
   }, [provider, serverConfig]);
 
-  const totalLoadedRows = useMemo(() => {
-    if (inputMethod === "csv") return csvFile ? "CSV ready" : "";
+  const parsedLinesLabel = useMemo(() => {
+    if (inputMethod !== "text") return "";
     const lines = pastedText.split(/\r?\n/).filter((line) => line.trim()).length;
     return lines > 0 ? `Parsed ${lines} line(s)` : "";
-  }, [inputMethod, csvFile, pastedText]);
+  }, [inputMethod, pastedText]);
 
   const handleStart = async () => {
     setError("");
@@ -424,7 +424,14 @@ const App = () => {
         ))}
 
         <Paper sx={{ p: 2, mb: 2 }}>
-          <Typography variant="h6" sx={{ mb: 2 }}>Step 1: Provide Resume Data</Typography>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
+            <Typography variant="h6">Step 1: Provide Resume Data</Typography>
+            {parsedLinesLabel ? (
+              <Typography variant="body2" sx={{ color: "success.main", fontWeight: 600 }}>
+                {parsedLinesLabel}
+              </Typography>
+            ) : null}
+          </Stack>
 
           <FormControl>
             <FormLabel>Choose input method:</FormLabel>
@@ -467,8 +474,6 @@ const App = () => {
               onChange={(event) => setPastedText(event.target.value)}
             />
           )}
-
-          {totalLoadedRows ? <Alert severity="success" sx={{ mt: 2 }}>{totalLoadedRows}</Alert> : null}
         </Paper>
 
         <Grid container spacing={2} sx={{ mb: 2 }}>

@@ -3,7 +3,7 @@ import { analyzeTextWithProvider, repairJsonWithProvider } from "./ai.js";
 import { createTempFilePath, cleanupTempFile, downloadAndIdentifyFile, extractTextAndUrlsFromPdf, extractTextFromImage } from "./extraction.js";
 import { SKILL_COLUMNS } from "./constants.js";
 import { calculateSkillProbabilities, classifyAndFormatProjectsFromAi, extractGithubUsername, formatMobileNumber, getHighestEducationInstitute, getLatestExperience, isPresentStr, relaxedJsonLoads, safeStr, sortLinks } from "./utils.js";
-import type { AnalysisType, Provider, ResumeInputRow, RowResult } from "./types.js";
+import type { AnalysisType, Provider, ResumeInputRow, RowResult, ShortlistingMode } from "./types.js";
 
 export interface WorkerContext {
   provider: Provider;
@@ -12,6 +12,7 @@ export interface WorkerContext {
   companyName: string;
   userRequirements: string;
   analysisType: AnalysisType;
+  shortlistingMode: ShortlistingMode;
   internalProjectsString: string;
 }
 
@@ -38,6 +39,223 @@ const defaultShortlistResult = (row: ResumeInputRow, companyName: string): RowRe
   "Internal Projects Count": 0,
   "External Projects Count": 0,
 });
+
+const defaultSectionwiseShortlistResult = (row: ResumeInputRow, companyName: string): RowResult => ({
+  "User ID": row.user_id,
+  "Resume Link": row["Resume link"],
+  "Company Name": companyName,
+  "Skills": "",
+  "Skills Pro": "0%",
+  "Projects": "",
+  "Projects Pro": "0%",
+  "Experience": "",
+  "Experience Pro": "0%",
+  "Certifications": "",
+  "Certification Pro": "0%",
+  "Education": "",
+  "Education Pro": "0%",
+  "Summary or Overview": "",
+  "Summary Pro": "0%",
+  "Overall Probability": 0,
+  "Overall Remarks": "Error processing",
+});
+
+const normalizeTechToken = (value: string): string =>
+  safeStr(value)
+    .toLowerCase()
+    .replace(/[`'".]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const splitTechStackText = (text: string): string[] =>
+  safeStr(text)
+    .split(/[\r\n,;|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const dedupeByNormalization = (items: string[]): string[] => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of items) {
+    const normalized = normalizeTechToken(item);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(item.trim());
+  }
+  return result;
+};
+
+const extractRequiredTechStacks = (requirements: string): string[] => {
+  const direct = dedupeByNormalization(splitTechStackText(requirements)).filter((token) => {
+    const words = token.split(/\s+/).filter(Boolean);
+    return words.length > 0 && words.length <= 4;
+  });
+  return direct;
+};
+
+const toPercentLabel = (value: number): string => `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+
+type SectionwiseKey = "skills" | "projects" | "experience" | "certifications" | "education" | "summary";
+
+const toStringArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value.map((item) => safeStr(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return splitTechStackText(value);
+  }
+  return [];
+};
+
+const toCompactToken = (value: string): string => safeStr(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const getRequiredTokenAliases = (tech: string): string[] => {
+  const compact = toCompactToken(tech);
+  const aliases = new Set<string>([compact]);
+
+  if (compact === "nodejs") {
+    aliases.add("node");
+  }
+  if (compact === "reactjs") {
+    aliases.add("react");
+  }
+  if (compact === "nextjs") {
+    aliases.add("next");
+  }
+  if (compact === "aiml") {
+    aliases.add("ai");
+    aliases.add("ml");
+  }
+
+  return Array.from(aliases);
+};
+
+const buildRequiredTechLookup = (requiredTechStacks: string[]): Map<string, string> => {
+  const lookup = new Map<string, string>();
+  for (const tech of requiredTechStacks) {
+    for (const alias of getRequiredTokenAliases(tech)) {
+      if (!lookup.has(alias)) {
+        lookup.set(alias, tech);
+      }
+    }
+  }
+  return lookup;
+};
+
+const extractSectionBlockFromAi = (data: Record<string, unknown>, keys: string[]): unknown => {
+  for (const key of keys) {
+    if (data[key] !== undefined) {
+      return data[key];
+    }
+  }
+  return undefined;
+};
+
+const extractSectionMatchedFromAi = (sectionBlock: unknown, requiredLookup: Map<string, string>): string[] => {
+  const sectionObj =
+    sectionBlock && typeof sectionBlock === "object" && !Array.isArray(sectionBlock)
+      ? (sectionBlock as Record<string, unknown>)
+      : {};
+
+  const candidates = [
+    sectionObj.matched_techstacks,
+    sectionObj.matchedTechstacks,
+    sectionObj.matched,
+    sectionObj.technologies,
+    sectionObj.techStacks,
+    sectionObj.tech_stack,
+    sectionObj.skills,
+    sectionBlock,
+  ];
+
+  const matched: string[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    for (const item of toStringArray(candidate)) {
+      const canonical = requiredLookup.get(toCompactToken(item));
+      if (!canonical) continue;
+      const key = toCompactToken(canonical);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matched.push(canonical);
+    }
+  }
+
+  return matched;
+};
+
+const parsePercentageNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.min(100, Math.round(value)));
+  }
+
+  const text = safeStr(value).replace("%", "").trim();
+  if (!text) return null;
+  const numeric = Number(text);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(0, Math.min(100, Math.round(numeric)));
+};
+
+const getSectionProbabilityFromAi = (sectionBlock: unknown, matchedCount: number, requiredCount: number): number => {
+  const fallback = requiredCount > 0 ? Math.round((matchedCount / requiredCount) * 100) : 0;
+  if (!sectionBlock || typeof sectionBlock !== "object" || Array.isArray(sectionBlock)) {
+    return fallback;
+  }
+
+  const obj = sectionBlock as Record<string, unknown>;
+  const fromModel =
+    parsePercentageNumber(obj.probability) ??
+    parsePercentageNumber(obj.score) ??
+    parsePercentageNumber(obj.match_probability) ??
+    parsePercentageNumber(obj.matchScore);
+
+  return fromModel ?? fallback;
+};
+
+const buildSectionwisePrompt = (requirementsText: string, requiredTechStacks: string[], resumeText: string): string => `
+You are an expert resume section analyzer.
+Return STRICT JSON only.
+
+Job Requirements (raw):
+${requirementsText}
+
+Required Tech Stacks (canonical list):
+${requiredTechStacks.join(", ")}
+
+Task:
+1) Analyze the resume text section-wise for:
+   - skills
+   - projects
+   - experience
+   - certifications
+   - education
+   - summary
+2) For each section, return:
+   - matched_techstacks: only from the canonical required tech stack list
+   - probability: integer 0-100 for that section
+3) Do not include tech stacks outside the required list.
+4) Keep Java and JavaScript strictly different.
+5) Resume formatting may be noisy/flattened; still infer the section context and map correctly.
+6) IMPORTANT: Section score must be based only on evidence within that specific section, not global resume-wide mentions.
+
+Required JSON:
+{
+  "skills": { "matched_techstacks": ["string"], "probability": 0 },
+  "projects": { "matched_techstacks": ["string"], "probability": 0 },
+  "experience": { "matched_techstacks": ["string"], "probability": 0 },
+  "certifications": { "matched_techstacks": ["string"], "probability": 0 },
+  "education": { "matched_techstacks": ["string"], "probability": 0 },
+  "summary": { "matched_techstacks": ["string"], "probability": 0 },
+  "overall_probability": 0,
+  "overall_remarks": "string"
+}
+
+Resume Text:
+---
+${resumeText}
+---
+`;
 
 const getComprehensiveDefaultResult = (row: ResumeInputRow, analysisType: AnalysisType, companyName: string): RowResult => {
   if (analysisType === "Internal Projects Matching") {
@@ -336,7 +554,10 @@ export const processResumeForShortlisting = async (
   resumeIndex: number,
   context: WorkerContext,
 ): Promise<RowResult> => {
-  const result = defaultShortlistResult(row, context.companyName);
+  const result =
+    context.shortlistingMode === "Sectionwise"
+      ? defaultSectionwiseShortlistResult(row, context.companyName)
+      : defaultShortlistResult(row, context.companyName);
   let resumeText = "";
 
   try {
@@ -345,6 +566,71 @@ export const processResumeForShortlisting = async (
 
     if (!resumeText.trim()) {
       throw new Error("Could not extract any text from the file.");
+    }
+
+    if (context.shortlistingMode === "Sectionwise") {
+      const requiredTechStacks = extractRequiredTechStacks(context.userRequirements);
+      if (requiredTechStacks.length === 0) {
+        throw new Error("Could not parse required tech stacks from Step 2 input. Enter tech stacks as comma/newline separated values.");
+      }
+      const prompt = buildSectionwisePrompt(context.userRequirements, requiredTechStacks, resumeText);
+      const aiResponse = await analyzeTextWithProvider(prompt, context.provider, context.apiKey);
+      const data = await parseAiJsonResponse(aiResponse, context.provider, context.apiKey);
+
+      if (typeof data !== "object" || Array.isArray(data)) {
+        throw new Error(`AI returned data that is not a JSON object. Type: ${typeof data}`);
+      }
+
+      if (data.error) {
+        throw new Error(safeStr(data.error));
+      }
+
+      const requiredLookup = buildRequiredTechLookup(requiredTechStacks);
+
+      const sectionConfig: Array<{
+        key: SectionwiseKey;
+        outputColumn: string;
+        probabilityColumn: string;
+        aiKeys: string[];
+      }> = [
+        { key: "skills", outputColumn: "Skills", probabilityColumn: "Skills Pro", aiKeys: ["skills", "skill"] },
+        { key: "projects", outputColumn: "Projects", probabilityColumn: "Projects Pro", aiKeys: ["projects", "project"] },
+        { key: "experience", outputColumn: "Experience", probabilityColumn: "Experience Pro", aiKeys: ["experience", "work_experience", "internship"] },
+        {
+          key: "certifications",
+          outputColumn: "Certifications",
+          probabilityColumn: "Certification Pro",
+          aiKeys: ["certifications", "certification", "certificates"],
+        },
+        { key: "education", outputColumn: "Education", probabilityColumn: "Education Pro", aiKeys: ["education", "academics"] },
+        { key: "summary", outputColumn: "Summary or Overview", probabilityColumn: "Summary Pro", aiKeys: ["summary", "overview", "profile_summary"] },
+      ];
+
+      const sectionScores: number[] = [];
+      const requiredCount = requiredTechStacks.length;
+
+      for (const section of sectionConfig) {
+        const sectionBlock = extractSectionBlockFromAi(data, section.aiKeys);
+        const matchedTechs = extractSectionMatchedFromAi(sectionBlock, requiredLookup);
+        const probability = getSectionProbabilityFromAi(sectionBlock, matchedTechs.length, requiredCount);
+
+        result[section.outputColumn] = matchedTechs.join(", ");
+        result[section.probabilityColumn] = toPercentLabel(probability);
+        sectionScores.push(probability);
+      }
+
+      const overallProbability =
+        parsePercentageNumber(data.overall_probability) ??
+        parsePercentageNumber(data.overallProbability) ??
+        (sectionScores.length > 0
+          ? Math.round(sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length)
+          : 0);
+      result["Overall Probability"] = overallProbability;
+      result["Overall Remarks"] =
+        safeStr(data.overall_remarks ?? data.overallRemarks) ||
+        `${requiredTechStacks.length} required tech stack(s); AI section-wise analysis completed.`;
+
+      return result;
     }
 
     const textLower = resumeText.toLowerCase();
@@ -486,10 +772,21 @@ ${resumeText}
   } catch (error) {
     const errorText = `Error: ${error instanceof Error ? error.message : String(error)}`;
     result["Overall Remarks"] = errorText;
-    result["Projects Remarks"] = errorText;
-    result["Skills Remarks"] = errorText;
-    result["Experience Remarks"] = errorText;
-    result["Other Remarks"] = errorText;
+    if (context.shortlistingMode === "Sectionwise") {
+      result["Summary or Overview"] = errorText;
+      result["Skills Pro"] = "0%";
+      result["Projects Pro"] = "0%";
+      result["Experience Pro"] = "0%";
+      result["Certification Pro"] = "0%";
+      result["Education Pro"] = "0%";
+      result["Summary Pro"] = "0%";
+      result["Overall Probability"] = 0;
+    } else {
+      result["Projects Remarks"] = errorText;
+      result["Skills Remarks"] = errorText;
+      result["Experience Remarks"] = errorText;
+      result["Other Remarks"] = errorText;
+    }
   }
 
   return result;

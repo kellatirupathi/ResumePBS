@@ -1,7 +1,7 @@
 export type Provider = "OpenAI" | "Mistral";
 export type InputMethod = "csv" | "text";
 export type AnalysisType = "All Data" | "Personal Details" | "Skills & Projects" | "Internal Projects Matching";
-export type ShortlistingMode = "Probability Wise (Default)" | "Priority Wise (P1 / P2 / P3 Bands)";
+export type ShortlistingMode = "Probability Wise (Default)" | "Priority Wise (P1 / P2 / P3 Bands)" | "Sectionwise";
 
 export interface ServerConfig {
   hasOpenAiKey: boolean;
@@ -51,4 +51,42 @@ export interface FilterState {
   minTotalProjects: number;
   minInternalProjects: number;
   minExternalProjects: number;
+}
+
+export interface BigQueryTableSnapshot {
+  tableId: string;
+  tableType: string;
+  rowCount: number;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  fetchError?: string;
+}
+
+export interface BigQueryTableSummary {
+  tableId: string;
+  tableType: string;
+  rowCount: number;
+}
+
+export interface BigQueryDatasetSnapshot {
+  projectId: string;
+  datasetId: string;
+  tableCount: number;
+  tables: BigQueryTableSummary[];
+}
+
+export interface BigQueryTableDataResponse {
+  projectId: string;
+  datasetId: string;
+  table: BigQueryTableSnapshot;
+}
+
+export interface BigQueryLearningMetricsResponse {
+  projectId: string;
+  datasetId: string;
+  tableId: string;
+  userIdColumn: string;
+  inputUserCount: number;
+  matchedRowCount: number;
+  rows: Array<Record<string, unknown>>;
 }

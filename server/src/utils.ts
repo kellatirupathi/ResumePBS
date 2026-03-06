@@ -444,6 +444,38 @@ export const orderAndSelectColumns = (
   const timestamp = dayjs().format("YYYYMMDD_HHmmss");
 
   if (mode === "shortlisting") {
+    if (shortlistingMode === "Sectionwise") {
+      const ordered = [...rows].sort((a, b) => asNumber(b["Overall Probability"]) - asNumber(a["Overall Probability"]));
+      const columns = [
+        "User ID",
+        "Resume Link",
+        "Skills",
+        "Skills Pro",
+        "Projects",
+        "Projects Pro",
+        "Experience",
+        "Experience Pro",
+        "Certifications",
+        "Certification Pro",
+        "Education",
+        "Education Pro",
+        "Summary or Overview",
+        "Summary Pro",
+        "Company Name",
+        "Analysis Datetime",
+      ];
+
+      const projected = ordered.map((row) =>
+        Object.fromEntries(columns.map((column) => [column, row[column] ?? ""])) as RowResult,
+      );
+
+      return {
+        rows: projected,
+        columns,
+        fileName: `resume_shortlist_${shortlistingMode.replaceAll(" ", "_").toLowerCase()}_${timestamp}.csv`,
+      };
+    }
+
     const numericRows = toNumberColumns(rows, [
       "Overall Probability",
       "Projects Probability",

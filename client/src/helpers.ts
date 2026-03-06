@@ -18,6 +18,30 @@ const getPriorityIndex = (value: string): number => {
 
 export const sortAndOrderRows = (rows: TableRow[], mode: string, shortlistingMode: ShortlistingMode): { rows: TableRow[]; columns: string[] } => {
   if (mode === "shortlisting") {
+    if (shortlistingMode === "Sectionwise") {
+      const columns = [
+        "User ID",
+        "Resume Link",
+        "Skills",
+        "Skills Pro",
+        "Projects",
+        "Projects Pro",
+        "Experience",
+        "Experience Pro",
+        "Certifications",
+        "Certification Pro",
+        "Education",
+        "Education Pro",
+        "Summary or Overview",
+        "Summary Pro",
+        "Company Name",
+        "Analysis Datetime",
+      ];
+
+      const ordered = [...rows].sort((a, b) => asNumber(b["Overall Probability"]) - asNumber(a["Overall Probability"]));
+      return { rows: ordered, columns };
+    }
+
     const baseColumns = [
       "User ID",
       "Resume Link",

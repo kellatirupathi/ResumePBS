@@ -1,7 +1,7 @@
 export const MISTRAL_MODEL = "mistral-medium-latest";
 export const MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions";
 
-export const OPENAI_MODEL = "gpt-4o-mini";
+export const OPENAI_MODEL = "gpt-4.1-mini";
 export const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
 export const GSHEET_NAME = "AI Resume Analysis Results";
@@ -9,6 +9,7 @@ export const GSHEET_NAME = "AI Resume Analysis Results";
 export const SHORTLISTING_MODES = [
   "Probability Wise (Default)",
   "Priority Wise (P1 / P2 / P3 Bands)",
+  "Sectionwise",
 ] as const;
 
 export const ANALYSIS_TYPES = [

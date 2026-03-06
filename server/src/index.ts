@@ -5,6 +5,7 @@ import multer from "multer";
 import { config, getProviderConcurrencyCap, getProviderConfig, getRecommendedConcurrency } from "./config.js";
 import { ANALYSIS_TYPES, SHORTLISTING_MODES } from "./constants.js";
 import { createJob, getFilteredCsv, getJob, getJobResults, parseCsvRows, parsePastedRows, serializeJob } from "./jobs.js";
+import { fetchBigQueryDatasetSnapshot, fetchBigQueryTableSnapshot, fetchLearningMetricsByUserIds } from "./bigquery.js";
 import type { AnalysisType, FilterQuery, InputMethod, JobCreatePayload, Provider, ShortlistingMode } from "./types.js";
 import { isOcrAvailable } from "./extraction.js";
 
@@ -61,12 +62,70 @@ const parseFilterQuery = (query: Record<string, unknown>): FilterQuery => {
   };
 };
 
+const parseUserIds = (input: unknown): string[] => {
+  if (Array.isArray(input)) {
+    return input.map((value) => String(value ?? "").trim()).filter(Boolean);
+  }
+
+  if (typeof input === "string") {
+    return input
+      .split(/[\r\n,\t ]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
 app.get("/api/config", (_req, res) => {
   res.json(getProviderConfig(isOcrAvailable()));
+});
+
+app.get("/api/bigquery", async (_req, res) => {
+  try {
+    const snapshot = await fetchBigQueryDatasetSnapshot();
+    return res.json(snapshot);
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+app.get("/api/bigquery/table/:tableId", async (req, res) => {
+  try {
+    const tableId = String(req.params.tableId ?? "").trim();
+    if (!tableId) {
+      return res.status(400).json({ error: "tableId is required." });
+    }
+
+    const snapshot = await fetchBigQueryTableSnapshot(tableId);
+    return res.json(snapshot);
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+app.post("/api/bigquery/learning-metrics", async (req, res) => {
+  try {
+    const userIds = parseUserIds(req.body?.userIds);
+    if (userIds.length === 0) {
+      return res.status(400).json({ error: "userIds is required. Provide one or more user IDs." });
+    }
+
+    const result = await fetchLearningMetricsByUserIds(userIds);
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 });
 
 app.post("/api/jobs", upload.single("csvFile"), (req, res) => {

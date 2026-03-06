@@ -120,6 +120,9 @@ const appendRows = async (spreadsheetId: string, worksheet: string, rows: Array<
 
 export const resolveSubsheetName = (analysisMode: string, shortlistingMode: string): string => {
   if (analysisMode === "shortlisting") {
+    if (shortlistingMode === "Sectionwise") {
+      return "Sectionwise_Results";
+    }
     return shortlistingMode === "Priority Wise (P1 / P2 / P3 Bands)"
       ? "Priority_Wise_Results"
       : "Probability_Wise_Results";

@@ -1,5 +1,15 @@
 import axios from "axios";
-import type { AnalysisType, InputMethod, JobStatusResponse, Provider, ServerConfig, ShortlistingMode } from "./types";
+import type {
+  AnalysisType,
+  BigQueryTableDataResponse,
+  BigQueryLearningMetricsResponse,
+  BigQueryDatasetSnapshot,
+  InputMethod,
+  JobStatusResponse,
+  Provider,
+  ServerConfig,
+  ShortlistingMode,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4010";
 
@@ -48,6 +58,21 @@ export const startJob = async (payload: StartJobPayload): Promise<{ jobId: strin
 
 export const getJobStatus = async (jobId: string): Promise<JobStatusResponse> => {
   const { data } = await client.get<JobStatusResponse>(`/api/jobs/${jobId}`);
+  return data;
+};
+
+export const getBigQueryDataset = async (): Promise<BigQueryDatasetSnapshot> => {
+  const { data } = await client.get<BigQueryDatasetSnapshot>("/api/bigquery");
+  return data;
+};
+
+export const getBigQueryTableData = async (tableId: string): Promise<BigQueryTableDataResponse> => {
+  const { data } = await client.get<BigQueryTableDataResponse>(`/api/bigquery/table/${encodeURIComponent(tableId)}`);
+  return data;
+};
+
+export const getLearningMetricsByUserIds = async (userIds: string[]): Promise<BigQueryLearningMetricsResponse> => {
+  const { data } = await client.post<BigQueryLearningMetricsResponse>("/api/bigquery/learning-metrics", { userIds });
   return data;
 };
 
