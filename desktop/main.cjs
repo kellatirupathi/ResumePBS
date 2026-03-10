@@ -7,11 +7,17 @@ const { pathToFileURL } = require("node:url");
 const DEFAULT_PORT = 4010;
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const SERVER_RETRY_DELAY_MS = 500;
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let serverPort = DEFAULT_PORT;
 let mainWindow = null;
 let serverBootPromise = null;
 let hasCheckedForUpdates = false;
+let autoUpdaterInstance = null;
+let autoUpdateInterval = null;
+let isUpdateCheckInFlight = false;
+let isUpdateDownloadInProgress = false;
+let hasPendingDownloadedUpdate = false;
 
 app.setName("AI Resume Analyzer");
 
@@ -198,27 +204,73 @@ const createMainWindow = async () => {
   await mainWindow.loadFile(clientEntryPath);
 };
 
+const scheduleAutoUpdateChecks = () => {
+  if (autoUpdateInterval) {
+    clearInterval(autoUpdateInterval);
+  }
+
+  autoUpdateInterval = setInterval(() => {
+    if (!autoUpdaterInstance) return;
+    if (isUpdateCheckInFlight || isUpdateDownloadInProgress || hasPendingDownloadedUpdate) return;
+
+    isUpdateCheckInFlight = true;
+    void autoUpdaterInstance.checkForUpdates().catch((error) => {
+      isUpdateCheckInFlight = false;
+      console.error("Auto-update check failed:", error instanceof Error ? error.message : String(error));
+    });
+  }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+
+  autoUpdateInterval.unref?.();
+};
+
 const setupAutoUpdates = () => {
   if (!app.isPackaged || hasCheckedForUpdates) return;
   hasCheckedForUpdates = true;
 
   try {
     const { autoUpdater } = require("electron-updater");
+    autoUpdaterInstance = autoUpdater;
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.fullChangelog = true;
+
+    autoUpdater.on("checking-for-update", () => {
+      isUpdateCheckInFlight = true;
+    });
+
+    autoUpdater.on("update-available", (info) => {
+      isUpdateCheckInFlight = false;
+      isUpdateDownloadInProgress = true;
+      console.info(`Auto-update available: ${info?.version ?? "unknown version"}`);
+    });
+
+    autoUpdater.on("update-not-available", () => {
+      isUpdateCheckInFlight = false;
+      isUpdateDownloadInProgress = false;
+    });
+
+    autoUpdater.on("download-progress", () => {
+      isUpdateDownloadInProgress = true;
+    });
 
     autoUpdater.on("error", (error) => {
+      isUpdateCheckInFlight = false;
+      isUpdateDownloadInProgress = false;
       console.error("Auto-update error:", error instanceof Error ? error.message : String(error));
     });
 
-    autoUpdater.on("update-downloaded", async () => {
+    autoUpdater.on("update-downloaded", async (info) => {
+      isUpdateCheckInFlight = false;
+      isUpdateDownloadInProgress = false;
+      hasPendingDownloadedUpdate = true;
+
       const result = await dialog.showMessageBox(mainWindow ?? undefined, {
         type: "info",
         buttons: ["Restart now", "Later"],
         defaultId: 0,
         cancelId: 1,
         title: "Update Ready",
-        message: "A new update has been downloaded.",
+        message: `Version ${info?.version ?? "latest"} has been downloaded.`,
         detail: "Restart the app now to apply the update.",
       });
 
@@ -227,7 +279,13 @@ const setupAutoUpdates = () => {
       }
     });
 
-    void autoUpdater.checkForUpdatesAndNotify();
+    scheduleAutoUpdateChecks();
+
+    isUpdateCheckInFlight = true;
+    void autoUpdater.checkForUpdates().catch((error) => {
+      isUpdateCheckInFlight = false;
+      console.error("Initial auto-update check failed:", error instanceof Error ? error.message : String(error));
+    });
   } catch (error) {
     console.error("Auto-update setup failed:", error);
   }
@@ -258,5 +316,12 @@ app.on("activate", () => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
+  }
+});
+
+app.on("before-quit", () => {
+  if (autoUpdateInterval) {
+    clearInterval(autoUpdateInterval);
+    autoUpdateInterval = null;
   }
 });

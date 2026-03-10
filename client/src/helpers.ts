@@ -9,6 +9,46 @@ const asNumber = (value: unknown): number => {
 
 const asInt = (value: unknown): number => Math.trunc(asNumber(value));
 
+const asPercent = (value: unknown): number => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const normalized = String(value ?? "")
+    .replace("%", "")
+    .trim();
+  const numeric = Number(normalized);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const splitMatchedSkills = (value: unknown): string[] =>
+  String(value ?? "")
+    .split(/[\r\n,;|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const getMatchedSkillCount = (row: TableRow): number => {
+  const seen = new Set<string>();
+
+  for (const skill of splitMatchedSkills(row["Skills"])) {
+    const normalized = skill.toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+  }
+
+  return seen.size;
+};
+
+const compareSectionwiseRows = (a: TableRow, b: TableRow): number => {
+  const byMatchedSkills = getMatchedSkillCount(b) - getMatchedSkillCount(a);
+  if (byMatchedSkills !== 0) return byMatchedSkills;
+
+  const bySkillsProbability = asPercent(b["Skills Pro"]) - asPercent(a["Skills Pro"]);
+  if (bySkillsProbability !== 0) return bySkillsProbability;
+
+  const byOverallProbability = asPercent(b["Overall Probability"]) - asPercent(a["Overall Probability"]);
+  if (byOverallProbability !== 0) return byOverallProbability;
+
+  return String(a["User ID"] ?? "").localeCompare(String(b["User ID"] ?? ""));
+};
+
 export const priorityOrder = ["P1", "P2", "P3", "Not Shortlisted"];
 
 const getPriorityIndex = (value: string): number => {
@@ -38,7 +78,7 @@ export const sortAndOrderRows = (rows: TableRow[], mode: string, shortlistingMod
         "Analysis Datetime",
       ];
 
-      const ordered = [...rows].sort((a, b) => asNumber(b["Overall Probability"]) - asNumber(a["Overall Probability"]));
+      const ordered = [...rows].sort(compareSectionwiseRows);
       return { rows: ordered, columns };
     }
 

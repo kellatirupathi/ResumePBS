@@ -67,7 +67,7 @@ Notes:
 - On first run, app creates `%APPDATA%/AI Resume Analyzer/.env` if missing.
 - That file is auto-copied from the bundled desktop env included at build time (`.env` if available, otherwise `.env.example`).
 - End users do not need to create a separate `.env` manually when keys are bundled in the installer.
-- Auto-update is enabled in packaged desktop builds.
+- Auto-update is enabled in packaged desktop builds and checks GitHub Releases on startup and periodically in the background.
 
 ## GitHub .exe Link (for sharing)
 
@@ -79,9 +79,9 @@ How to publish downloadable `.exe` links:
 
 1. Push code to GitHub.
 2. Create and push a version tag (example `v1.0.0`).
-3. Workflow builds `release/*.exe` on Windows.
-4. Workflow also uploads `latest.yml` and `*.blockmap` (required for desktop auto-update).
-5. Built installer is attached to the GitHub Release for that tag.
+3. Workflow runs `npm run desktop:publish` on Windows for tag builds.
+4. `electron-builder` publishes the installer, `latest.yml`, and `*.blockmap` to the GitHub Release for that tag.
+5. Installed desktop users receive the update automatically when the new version is available.
 6. Share the GitHub Release asset link with others.
 
 Auto-update requirement:

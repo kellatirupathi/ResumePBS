@@ -20,6 +20,7 @@
     "desktop:prepare-env": "node desktop/prepare-env.cjs",
     "desktop:dev": "npm run desktop:prepare-env && npm run build && node desktop/run-electron.cjs",
     "desktop:dist": "npm run desktop:prepare-env && npm run build && electron-builder --win nsis",
+    "desktop:publish": "npm run desktop:prepare-env && npm run build && electron-builder --win nsis --publish always",
     "desktop:portable": "npm run desktop:prepare-env && npm run build && electron-builder --win portable"
   },
   "dependencies": {
@@ -91,7 +92,8 @@
       {
         "provider": "github",
         "owner": "kellatirupathi",
-        "repo": "ResumePBS"
+        "repo": "ResumePBS",
+        "releaseType": "release"
       }
     ]
   }

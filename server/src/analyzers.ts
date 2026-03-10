@@ -93,7 +93,12 @@ const extractRequiredTechStacks = (requirements: string): string[] => {
   return direct;
 };
 
-const toPercentLabel = (value: number): string => `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+const roundToTwoDecimals = (value: number): number => Math.round(value * 100) / 100;
+
+const toPercentLabel = (value: number): string => {
+  const normalized = Math.max(0, Math.min(100, roundToTwoDecimals(value)));
+  return `${normalized.toFixed(2).replace(/\.?0+$/, "")}%`;
+};
 
 type SectionwiseKey = "skills" | "projects" | "experience" | "certifications" | "education" | "summary";
 
@@ -197,21 +202,8 @@ const parsePercentageNumber = (value: unknown): number | null => {
   return Math.max(0, Math.min(100, Math.round(numeric)));
 };
 
-const getSectionProbabilityFromAi = (sectionBlock: unknown, matchedCount: number, requiredCount: number): number => {
-  const fallback = requiredCount > 0 ? Math.round((matchedCount / requiredCount) * 100) : 0;
-  if (!sectionBlock || typeof sectionBlock !== "object" || Array.isArray(sectionBlock)) {
-    return fallback;
-  }
-
-  const obj = sectionBlock as Record<string, unknown>;
-  const fromModel =
-    parsePercentageNumber(obj.probability) ??
-    parsePercentageNumber(obj.score) ??
-    parsePercentageNumber(obj.match_probability) ??
-    parsePercentageNumber(obj.matchScore);
-
-  return fromModel ?? fallback;
-};
+const getSectionProbabilityFromFormula = (matchedCount: number, requiredCount: number): number =>
+  requiredCount > 0 ? roundToTwoDecimals((matchedCount / requiredCount) * 100) : 0;
 
 const buildSectionwisePrompt = (requirementsText: string, requiredTechStacks: string[], resumeText: string): string => `
 You are an expert resume section analyzer.
@@ -233,21 +225,19 @@ Task:
    - summary
 2) For each section, return:
    - matched_techstacks: only from the canonical required tech stack list
-   - probability: integer 0-100 for that section
-3) Do not include tech stacks outside the required list.
-4) Keep Java and JavaScript strictly different.
-5) Resume formatting may be noisy/flattened; still infer the section context and map correctly.
-6) IMPORTANT: Section score must be based only on evidence within that specific section, not global resume-wide mentions.
+ 3) Do not include tech stacks outside the required list.
+ 4) Keep Java and JavaScript strictly different.
+ 5) Resume formatting may be noisy/flattened; still infer the section context and map correctly.
+ 6) IMPORTANT: Match tech stacks to the correct section only, not global resume-wide mentions.
 
 Required JSON:
 {
-  "skills": { "matched_techstacks": ["string"], "probability": 0 },
-  "projects": { "matched_techstacks": ["string"], "probability": 0 },
-  "experience": { "matched_techstacks": ["string"], "probability": 0 },
-  "certifications": { "matched_techstacks": ["string"], "probability": 0 },
-  "education": { "matched_techstacks": ["string"], "probability": 0 },
-  "summary": { "matched_techstacks": ["string"], "probability": 0 },
-  "overall_probability": 0,
+  "skills": { "matched_techstacks": ["string"] },
+  "projects": { "matched_techstacks": ["string"] },
+  "experience": { "matched_techstacks": ["string"] },
+  "certifications": { "matched_techstacks": ["string"] },
+  "education": { "matched_techstacks": ["string"] },
+  "summary": { "matched_techstacks": ["string"] },
   "overall_remarks": "string"
 }
 
@@ -612,7 +602,7 @@ export const processResumeForShortlisting = async (
       for (const section of sectionConfig) {
         const sectionBlock = extractSectionBlockFromAi(data, section.aiKeys);
         const matchedTechs = extractSectionMatchedFromAi(sectionBlock, requiredLookup);
-        const probability = getSectionProbabilityFromAi(sectionBlock, matchedTechs.length, requiredCount);
+        const probability = getSectionProbabilityFromFormula(matchedTechs.length, requiredCount);
 
         result[section.outputColumn] = matchedTechs.join(", ");
         result[section.probabilityColumn] = toPercentLabel(probability);
@@ -620,11 +610,7 @@ export const processResumeForShortlisting = async (
       }
 
       const overallProbability =
-        parsePercentageNumber(data.overall_probability) ??
-        parsePercentageNumber(data.overallProbability) ??
-        (sectionScores.length > 0
-          ? Math.round(sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length)
-          : 0);
+        sectionScores.length > 0 ? roundToTwoDecimals(sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length) : 0;
       result["Overall Probability"] = overallProbability;
       result["Overall Remarks"] =
         safeStr(data.overall_remarks ?? data.overallRemarks) ||
