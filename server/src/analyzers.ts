@@ -48,8 +48,16 @@ const defaultSectionwiseShortlistResult = (row: ResumeInputRow, companyName: str
   "Skills Pro": "0%",
   "Projects": "",
   "Projects Pro": "0%",
+  "Internal Project Title": "",
+  "Internal Projects Techstacks": "",
+  "External Project Title": "",
+  "External Projects Techstacks": "",
   "Experience": "",
   "Experience Pro": "0%",
+  "Latest Experience Company Name": "",
+  "Latest Experience Job Title": "",
+  "Latest Experience Start Date": "",
+  "Latest Experience End Date": "",
   "Certifications": "",
   "Certification Pro": "0%",
   "Education": "",
@@ -205,12 +213,24 @@ const parsePercentageNumber = (value: unknown): number | null => {
 const getSectionProbabilityFromFormula = (matchedCount: number, requiredCount: number): number =>
   requiredCount > 0 ? roundToTwoDecimals((matchedCount / requiredCount) * 100) : 0;
 
-const buildSectionwisePrompt = (requirementsText: string, requiredTechStacks: string[], resumeText: string): string => `
+const sectionwiseSectionKeyAliases: Record<SectionwiseKey, string[]> = {
+  skills: ["skills", "skill"],
+  projects: ["projects", "project"],
+  experience: ["experience", "work_experience", "internship"],
+  certifications: ["certifications", "certification", "certificates"],
+  education: ["education", "academics"],
+  summary: ["summary", "overview", "profile_summary"],
+};
+
+const buildSectionwisePrompt = (context: WorkerContext, requiredTechStacks: string[], resumeText: string): string => {
+  const projectClassificationBlock = getProjectClassificationBlock(context.internalProjectsString, context.analysisType);
+
+  return `
 You are an expert resume section analyzer.
 Return STRICT JSON only.
 
 Job Requirements (raw):
-${requirementsText}
+${context.userRequirements}
 
 Required Tech Stacks (canonical list):
 ${requiredTechStacks.join(", ")}
@@ -225,10 +245,21 @@ Task:
    - summary
 2) For each section, return:
    - matched_techstacks: only from the canonical required tech stack list
- 3) Do not include tech stacks outside the required list.
- 4) Keep Java and JavaScript strictly different.
- 5) Resume formatting may be noisy/flattened; still infer the section context and map correctly.
- 6) IMPORTANT: Match tech stacks to the correct section only, not global resume-wide mentions.
+3) In the same response, extract actual project entries into project_entries.
+4) In the same response, extract actual work experience / internship entries into experience_entries.
+5) Do not include tech stacks outside the required list in matched_techstacks.
+6) Keep Java and JavaScript strictly different.
+7) Resume formatting may be noisy/flattened; still infer the section context and map correctly.
+8) IMPORTANT: Match tech stacks to the correct section only, not global resume-wide mentions.
+9) IMPORTANT: Do not treat summary/profile/objective text, "experienced in" statements, skills, certifications, education, or projects as work experience.
+10) If the resume has no real work experience or internship entry, set experience_entries to [].
+11) project_entries must contain only actual projects from the resume.
+12) project_entries must ALWAYS be present as an array. Use [] when none exist.
+13) experience_entries must ALWAYS be present as an array. Use [] when none exist.
+14) Do NOT omit any top-level key from the required JSON.
+
+Project Classification Rules:
+${projectClassificationBlock}
 
 Required JSON:
 {
@@ -238,6 +269,12 @@ Required JSON:
   "certifications": { "matched_techstacks": ["string"] },
   "education": { "matched_techstacks": ["string"] },
   "summary": { "matched_techstacks": ["string"] },
+  "project_entries": [
+    { "title": "string", "techStack": ["string"], "classification": "Internal" or "External" }
+  ],
+  "experience_entries": [
+    { "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string or list of strings" }
+  ],
   "overall_remarks": "string"
 }
 
@@ -246,6 +283,7 @@ Resume Text:
 ${resumeText}
 ---
 `;
+};
 
 const getComprehensiveDefaultResult = (row: ResumeInputRow, analysisType: AnalysisType, companyName: string): RowResult => {
   if (analysisType === "Internal Projects Matching") {
@@ -377,10 +415,112 @@ const keywordMatch = (text: string, token: string): boolean => {
   return new RegExp(`\\b${escaped}\\b`, "i").test(text);
 };
 
+const applyLatestExperienceToResult = (result: RowResult, latestExperience: Record<string, unknown> | null): void => {
+  if (!latestExperience) return;
+
+  result["Latest Experience Company Name"] = safeStr(latestExperience.companyName);
+  result["Latest Experience Job Title"] = safeStr(latestExperience.jobTitle);
+  result["Latest Experience Start Date"] = safeStr(latestExperience.startDate);
+  result["Latest Experience End Date"] = safeStr(latestExperience.endDate);
+};
+
+const getRequiredSectionwiseArray = (data: Record<string, unknown>, keys: string[], label: string): unknown[] => {
+  for (const key of keys) {
+    if (!(key in data)) {
+      continue;
+    }
+
+    const value = data[key];
+    if (!Array.isArray(value)) {
+      throw new Error(`Sectionwise AI response field '${key}' must be an array for ${label}.`);
+    }
+
+    return value;
+  }
+
+  throw new Error(`Sectionwise AI response is missing required ${label} field.`);
+};
+
+const validateSectionwisePayload = (data: Record<string, unknown>): void => {
+  for (const [sectionKey, aliases] of Object.entries(sectionwiseSectionKeyAliases) as Array<[SectionwiseKey, string[]]>) {
+    const sectionBlock = extractSectionBlockFromAi(data, aliases);
+    if (sectionBlock === undefined) {
+      throw new Error(`Sectionwise AI response is missing required '${sectionKey}' section.`);
+    }
+  }
+
+  getRequiredSectionwiseArray(data, ["project_entries", "projectEntries"], "project_entries");
+  getRequiredSectionwiseArray(data, ["experience_entries", "experienceEntries"], "experience_entries");
+};
+
+const buildAllDataExtractionPrompt = (resumeText: string, context: WorkerContext): string => {
+  const projectInstructionBlock = getProjectInstructionBlock();
+  const projectClassificationBlock = getProjectClassificationBlock(context.internalProjectsString, context.analysisType);
+
+  return `
+You are a machine that strictly outputs a single, valid JSON object. Analyze the resume text provided below to populate the specified JSON structure.
+
+**JSON STRUCTURE AND INSTRUCTIONS:**
+{
+  "fullName": "string", "mobileNumber": "string", "email": "string",
+  "address": {"city": "string", "state": "string"}, "textLinks": ["list of all URLs found"],
+  "skills": ["list of strings"], "certifications": ["list of strings"], "awards": ["list of strings"],
+  "achievements": ["list of strings"], "yearsITExperience": "float or string", "yearsNonITExperience": "float or string",
+  ${projectInstructionBlock}
+  "education": {
+    "masters_doctorate": {
+        "courseName": "e.g. M.Tech, MBA, PhD",
+        "branch": "e.g. Computer Science, VLSI, Marketing",
+        "collegeName": "string",
+        "completionYear": "string",
+        "percentage": "string (e.g. 85% or 8.5 CGPA)"
+    },
+    "bachelors": {
+        "courseName": "e.g. B.Tech, B.Sc, B.Com",
+        "branch": "e.g. Computer Science, Mechanical, Civil",
+        "collegeName": "string",
+        "completionYear": "string",
+        "percentage": "string"
+    },
+    "diploma": {
+        "courseName": "e.g. Diploma",
+        "branch": "e.g. ECE, CSE",
+        "collegeName": "string",
+        "completionYear": "string",
+        "percentage": "string"
+    },
+    "intermediate_puc_12th": {
+        "board": "e.g. CBSE, State Board",
+        "stream": "e.g. MPC, BiPC, Science, Commerce",
+        "school_college_name": "string",
+        "completionYear": "string",
+        "percentage": "string"
+    },
+    "ssc_10th": {
+        "board": "e.g. CBSE, SSC",
+        "schoolName": "string",
+        "completionYear": "string",
+        "percentage": "string"
+    }
+  },
+  "experience": [ { "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string or list of strings" } ]
+}
+
+**PROJECT CLASSIFICATION RULES:**
+${projectClassificationBlock}
+
+Resume Text:
+---
+${resumeText}
+---
+`;
+};
+
 const extractProjectsWithFocusedPrompt = async (
   resumeText: string,
   context: WorkerContext,
 ): Promise<Record<string, string> | null> => {
+  const projectClassificationBlock = getProjectClassificationBlock(context.internalProjectsString, context.analysisType);
   const projectPrompt = `
 Extract projects from the resume text and return ONLY valid JSON.
 Return format:
@@ -395,7 +535,9 @@ Return format:
 }
 
 Rules:
-- If classification is unclear, use "External".
+- Extract only actual project entries from the resume.
+- Each project must include its title. Include tech stacks only when explicitly present.
+- ${projectClassificationBlock.trim()}
 - Do not add explanation text outside JSON.
 
 Resume Text:
@@ -435,6 +577,8 @@ const extractProjectsPayload = (data: Record<string, unknown>): unknown[] => {
   const candidates: unknown[] = [
     data.projects,
     data.project,
+    data.project_entries,
+    data.projectEntries,
     data.projectsList,
     data.project_list,
     data.projectDetails,
@@ -563,7 +707,7 @@ export const processResumeForShortlisting = async (
       if (requiredTechStacks.length === 0) {
         throw new Error("Could not parse required tech stacks from Step 2 input. Enter tech stacks as comma/newline separated values.");
       }
-      const prompt = buildSectionwisePrompt(context.userRequirements, requiredTechStacks, resumeText);
+      const prompt = buildSectionwisePrompt(context, requiredTechStacks, resumeText);
       const aiResponse = await analyzeTextWithProvider(prompt, context.provider, context.apiKey);
       const data = await parseAiJsonResponse(aiResponse, context.provider, context.apiKey);
 
@@ -574,6 +718,8 @@ export const processResumeForShortlisting = async (
       if (data.error) {
         throw new Error(safeStr(data.error));
       }
+
+      validateSectionwisePayload(data);
 
       const requiredLookup = buildRequiredTechLookup(requiredTechStacks);
 
@@ -615,6 +761,12 @@ export const processResumeForShortlisting = async (
       result["Overall Remarks"] =
         safeStr(data.overall_remarks ?? data.overallRemarks) ||
         `${requiredTechStacks.length} required tech stack(s); AI section-wise analysis completed.`;
+
+      const sectionwiseProjectEntries = getRequiredSectionwiseArray(data, ["project_entries", "projectEntries"], "project_entries");
+      const sectionwiseExperienceEntries = getRequiredSectionwiseArray(data, ["experience_entries", "experienceEntries"], "experience_entries");
+
+      Object.assign(result, classifyAndFormatProjectsFromAi(sectionwiseProjectEntries));
+      applyLatestExperienceToResult(result, getLatestExperience(sectionwiseExperienceEntries));
 
       return result;
     }
@@ -831,63 +983,7 @@ ${resumeText}
 ---
 `;
     } else if (context.analysisType === "All Data") {
-      prompt = `
-You are a machine that strictly outputs a single, valid JSON object. Analyze the resume text provided below to populate the specified JSON structure.
-
-**JSON STRUCTURE AND INSTRUCTIONS:**
-{
-  "fullName": "string", "mobileNumber": "string", "email": "string",
-  "address": {"city": "string", "state": "string"}, "textLinks": ["list of all URLs found"],
-  "skills": ["list of strings"], "certifications": ["list of strings"], "awards": ["list of strings"],
-  "achievements": ["list of strings"], "yearsITExperience": "float or string", "yearsNonITExperience": "float or string",
-  ${projectInstructionBlock}
-  "education": {
-    "masters_doctorate": {
-        "courseName": "e.g. M.Tech, MBA, PhD",
-        "branch": "e.g. Computer Science, VLSI, Marketing",
-        "collegeName": "string",
-        "completionYear": "string",
-        "percentage": "string (e.g. 85% or 8.5 CGPA)"
-    },
-    "bachelors": {
-        "courseName": "e.g. B.Tech, B.Sc, B.Com",
-        "branch": "e.g. Computer Science, Mechanical, Civil",
-        "collegeName": "string",
-        "completionYear": "string",
-        "percentage": "string"
-    },
-    "diploma": {
-        "courseName": "e.g. Diploma",
-        "branch": "e.g. ECE, CSE",
-        "collegeName": "string",
-        "completionYear": "string",
-        "percentage": "string"
-    },
-    "intermediate_puc_12th": {
-        "board": "e.g. CBSE, State Board",
-        "stream": "e.g. MPC, BiPC, Science, Commerce",
-        "school_college_name": "string",
-        "completionYear": "string",
-        "percentage": "string"
-    },
-    "ssc_10th": {
-        "board": "e.g. CBSE, SSC",
-        "schoolName": "string",
-        "completionYear": "string",
-        "percentage": "string"
-    }
-  },
-  "experience": [ { "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string or list of strings" } ]
-}
-
-**PROJECT CLASSIFICATION RULES:**
-${projectClassificationBlock}
-
-Resume Text:
----
-${resumeText}
----
-`;
+      prompt = buildAllDataExtractionPrompt(resumeText, context);
     } else if (context.analysisType === "Personal Details") {
       prompt = `
 Analyze the provided resume text and extract ONLY the personal details into a pure JSON object.
