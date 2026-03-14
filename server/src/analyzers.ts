@@ -110,6 +110,17 @@ const toPercentLabel = (value: number): string => {
 
 type SectionwiseKey = "skills" | "projects" | "experience" | "certifications" | "education" | "summary";
 
+const sectionHeadingAliases: Record<SectionwiseKey, string[]> = {
+  skills: ["skills", "technical skills", "skill set", "core competencies", "technologies", "technical proficiencies"],
+  projects: ["projects", "project", "project experience", "academic projects", "personal projects", "relevant projects"],
+  experience: ["experience", "work experience", "professional experience", "employment history", "internship", "internships"],
+  certifications: ["certifications", "certification", "certificates", "courses", "trainings"],
+  education: ["education", "academics", "academic details", "qualifications", "educational qualifications"],
+  summary: ["summary", "professional summary", "profile summary", "profile", "objective", "career objective", "overview"],
+};
+
+const headingSuffixes = new Set(["section", "details", "detail", "history", "profile", "information", "info"]);
+
 const toStringArray = (value: unknown): string[] => {
   if (Array.isArray(value)) {
     return value.map((item) => safeStr(item).trim()).filter(Boolean);
@@ -121,6 +132,294 @@ const toStringArray = (value: unknown): string[] => {
 };
 
 const toCompactToken = (value: string): string => safeStr(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const normalizeHeadingText = (value: string): string =>
+  safeStr(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9/&.\s-]/g, " ")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const normalizeSearchText = (value: string): string => safeStr(value).toLowerCase().replace(/\s+/g, " ").trim();
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const findSectionHeading = (line: string): SectionwiseKey | null => {
+  const normalized = normalizeHeadingText(line);
+  if (!normalized || normalized.split(" ").length > 6) {
+    return null;
+  }
+
+  for (const [sectionKey, aliases] of Object.entries(sectionHeadingAliases) as Array<[SectionwiseKey, string[]]>) {
+    for (const alias of aliases) {
+      if (normalized === alias) {
+        return sectionKey;
+      }
+
+      if (!normalized.startsWith(`${alias} `)) {
+        continue;
+      }
+
+      const suffix = normalized.slice(alias.length).trim();
+      if (headingSuffixes.has(suffix)) {
+        return sectionKey;
+      }
+    }
+  }
+
+  return null;
+};
+
+const extractSectionTextByHeading = (resumeText: string): Record<SectionwiseKey, string> => {
+  const sections = Object.fromEntries(
+    (Object.keys(sectionHeadingAliases) as SectionwiseKey[]).map((key) => [key, [] as string[]]),
+  ) as Record<SectionwiseKey, string[]>;
+
+  const lines = safeStr(resumeText)
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  let currentSection: SectionwiseKey | null = null;
+  const preamble: string[] = [];
+
+  for (const line of lines) {
+    const heading = findSectionHeading(line);
+    if (heading) {
+      currentSection = heading;
+      continue;
+    }
+
+    if (currentSection) {
+      sections[currentSection].push(line);
+    } else {
+      preamble.push(line);
+    }
+  }
+
+  if (!sections.summary.length && preamble.length > 0) {
+    sections.summary = preamble.slice(0, 8);
+  }
+
+  return Object.fromEntries(
+    (Object.keys(sections) as SectionwiseKey[]).map((key) => [key, sections[key].join("\n").trim()]),
+  ) as Record<SectionwiseKey, string>;
+};
+
+const getTechMatchPatterns = (tech: string): RegExp[] => {
+  const compact = toCompactToken(tech);
+
+  switch (compact) {
+    case "node":
+    case "nodejs":
+      return [/\bnode(?:\s*\.?\s*js)?\b/i];
+    case "react":
+    case "reactjs":
+      return [/\breact(?:\s*\.?\s*js)?\b/i];
+    case "next":
+    case "nextjs":
+      return [/\bnext(?:\s*\.?\s*js)?\b/i];
+    case "angular":
+    case "angularjs":
+      return [/\bangular(?:\s*\.?\s*js)?\b/i];
+    case "javascript":
+      return [/\bjavascript\b/i, /\becmascript\b/i];
+    case "typescript":
+      return [/\btypescript\b/i];
+    case "java":
+      return [/\bjava\b/i];
+    case "springboot":
+      return [/\bspring\s*boot\b/i, /\bspringboot\b/i];
+    case "dotnet":
+      return [/(?<![a-z0-9])\.net(?![a-z0-9])/i, /\bdot\s*net\b/i];
+    case "aiml":
+      return [/\bai\s*\/\s*ml\b/i, /\bartificial intelligence\b/i, /\bmachine learning\b/i];
+    default: {
+      const normalized = safeStr(tech).trim();
+      if (!normalized) return [];
+      const pattern = normalized
+        .split(/\s+/)
+        .map((part) => escapeRegExp(part))
+        .join("\\s+");
+      return [new RegExp(`\\b${pattern}\\b`, "i")];
+    }
+  }
+};
+
+const matchesExplicitTechInText = (text: string, tech: string): boolean => {
+  if (!text.trim()) return false;
+  return getTechMatchPatterns(tech).some((pattern) => pattern.test(text));
+};
+
+const joinFieldValues = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return value.map((item) => safeStr(item).trim()).filter(Boolean).join("\n");
+  }
+  return safeStr(value).trim();
+};
+
+const buildProjectEntriesEvidenceText = (projectEntries: unknown[]): string => {
+  const chunks: string[] = [];
+
+  for (const entry of projectEntries) {
+    if (typeof entry === "string") {
+      const value = safeStr(entry).trim();
+      if (value) chunks.push(value);
+      continue;
+    }
+
+    if (!entry || typeof entry !== "object") continue;
+    const project = entry as Record<string, unknown>;
+    chunks.push(
+      joinFieldValues([
+        project.title,
+        project.projectTitle,
+        project.project_title,
+        project.name,
+        project.projectName,
+        project.description,
+        project.summary,
+        project.details,
+        project.techStack,
+        project.techstack,
+        project.tech_stack,
+        project.technologies,
+        project.tools,
+      ]),
+    );
+  }
+
+  return chunks.map((chunk) => chunk.trim()).filter(Boolean).join("\n");
+};
+
+const buildExperienceEntriesEvidenceText = (experienceEntries: unknown[]): string => {
+  const chunks: string[] = [];
+
+  for (const entry of experienceEntries) {
+    if (typeof entry === "string") {
+      const value = safeStr(entry).trim();
+      if (value) chunks.push(value);
+      continue;
+    }
+
+    if (!entry || typeof entry !== "object") continue;
+    const experience = entry as Record<string, unknown>;
+    chunks.push(
+      joinFieldValues([
+        experience.companyName,
+        experience.jobTitle,
+        experience.startDate,
+        experience.endDate,
+        experience.description,
+        experience.responsibilities,
+        experience.techStack,
+        experience.technologies,
+      ]),
+    );
+  }
+
+  return chunks.map((chunk) => chunk.trim()).filter(Boolean).join("\n");
+};
+
+const collectEvidenceQuotesForSection = (sectionBlock: unknown): string[] => {
+  if (!sectionBlock || typeof sectionBlock !== "object" || Array.isArray(sectionBlock)) {
+    return [];
+  }
+
+  const sectionObj = sectionBlock as Record<string, unknown>;
+  const rawEvidence = [
+    sectionObj.evidence,
+    sectionObj.evidence_quotes,
+    sectionObj.evidenceQuotes,
+    sectionObj.quotes,
+    sectionObj.quote,
+    sectionObj.evidence_text,
+    sectionObj.evidenceText,
+  ];
+
+  const quotes: string[] = [];
+
+  for (const candidate of rawEvidence) {
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        if (typeof item === "string") {
+          const quote = safeStr(item).trim();
+          if (quote) quotes.push(quote);
+          continue;
+        }
+
+        if (!item || typeof item !== "object") continue;
+        const quote = safeStr(
+          (item as Record<string, unknown>).quote ??
+            (item as Record<string, unknown>).text ??
+            (item as Record<string, unknown>).evidence ??
+            (item as Record<string, unknown>).snippet,
+        ).trim();
+        if (quote) quotes.push(quote);
+      }
+      continue;
+    }
+
+    const quote = safeStr(candidate).trim();
+    if (quote) quotes.push(quote);
+  }
+
+  return quotes;
+};
+
+const quoteExistsInResume = (resumeText: string, quote: string): boolean => {
+  const normalizedResume = normalizeSearchText(resumeText);
+  const normalizedQuote = normalizeSearchText(quote);
+  if (!normalizedQuote) return false;
+  return normalizedResume.includes(normalizedQuote);
+};
+
+const buildSectionEvidenceTexts = (
+  resumeText: string,
+  projectEntries: unknown[],
+  experienceEntries: unknown[],
+): Record<SectionwiseKey, string> => {
+  const extractedSections = extractSectionTextByHeading(resumeText);
+  return {
+    skills: extractedSections.skills,
+    projects: [extractedSections.projects, buildProjectEntriesEvidenceText(projectEntries)].filter(Boolean).join("\n"),
+    experience: [extractedSections.experience, buildExperienceEntriesEvidenceText(experienceEntries)].filter(Boolean).join("\n"),
+    certifications: extractedSections.certifications,
+    education: extractedSections.education,
+    summary: extractedSections.summary,
+  };
+};
+
+const getVerifiedSectionMatches = (
+  sectionBlock: unknown,
+  sectionEvidenceText: string,
+  resumeText: string,
+  requiredTechStacks: string[],
+): string[] => {
+  const verified: string[] = [];
+  const evidenceQuotes = collectEvidenceQuotesForSection(sectionBlock);
+
+  for (const tech of requiredTechStacks) {
+    if (matchesExplicitTechInText(sectionEvidenceText, tech)) {
+      verified.push(tech);
+      continue;
+    }
+
+    const hasVerifiedQuote = evidenceQuotes.some(
+      (quote) =>
+        quoteExistsInResume(resumeText, quote) &&
+        (!sectionEvidenceText.trim() || quoteExistsInResume(sectionEvidenceText, quote)) &&
+        matchesExplicitTechInText(quote, tech),
+    );
+
+    if (hasVerifiedQuote) {
+      verified.push(tech);
+    }
+  }
+
+  return verified;
+};
 
 const getRequiredTokenAliases = (tech: string): string[] => {
   const compact = toCompactToken(tech);
@@ -257,20 +556,22 @@ Task:
 12) project_entries must ALWAYS be present as an array. Use [] when none exist.
 13) experience_entries must ALWAYS be present as an array. Use [] when none exist.
 14) Do NOT omit any top-level key from the required JSON.
+15) Never infer Angular from JavaScript/Bootstrap or Node JS from REST API/backend wording. Match only when the technology name or a common alias is explicitly present in that same section.
+16) For every matched tech stack, include exact evidence copied from that same section of the resume.
 
 Project Classification Rules:
 ${projectClassificationBlock}
 
 Required JSON:
 {
-  "skills": { "matched_techstacks": ["string"] },
-  "projects": { "matched_techstacks": ["string"] },
-  "experience": { "matched_techstacks": ["string"] },
-  "certifications": { "matched_techstacks": ["string"] },
-  "education": { "matched_techstacks": ["string"] },
-  "summary": { "matched_techstacks": ["string"] },
+  "skills": { "matched_techstacks": ["string"], "evidence": [ { "techstack": "string", "quote": "exact text from this section" } ] },
+  "projects": { "matched_techstacks": ["string"], "evidence": [ { "techstack": "string", "quote": "exact text from this section" } ] },
+  "experience": { "matched_techstacks": ["string"], "evidence": [ { "techstack": "string", "quote": "exact text from this section" } ] },
+  "certifications": { "matched_techstacks": ["string"], "evidence": [ { "techstack": "string", "quote": "exact text from this section" } ] },
+  "education": { "matched_techstacks": ["string"], "evidence": [ { "techstack": "string", "quote": "exact text from this section" } ] },
+  "summary": { "matched_techstacks": ["string"], "evidence": [ { "techstack": "string", "quote": "exact text from this section" } ] },
   "project_entries": [
-    { "title": "string", "techStack": ["string"], "classification": "Internal" or "External" }
+    { "title": "string", "description": "exact project text from resume when available", "techStack": ["string"], "classification": "Internal" or "External" }
   ],
   "experience_entries": [
     { "companyName": "string", "jobTitle": "string", "startDate": "string", "endDate": "string", "description": "string or list of strings" }
@@ -528,6 +829,7 @@ Return format:
   "projects": [
     {
       "title": "string",
+      "description": "exact project text from resume when available",
       "techStack": ["string"],
       "classification": "Internal" or "External"
     }
@@ -721,8 +1023,6 @@ export const processResumeForShortlisting = async (
 
       validateSectionwisePayload(data);
 
-      const requiredLookup = buildRequiredTechLookup(requiredTechStacks);
-
       const sectionConfig: Array<{
         key: SectionwiseKey;
         outputColumn: string;
@@ -744,10 +1044,13 @@ export const processResumeForShortlisting = async (
 
       const sectionScores: number[] = [];
       const requiredCount = requiredTechStacks.length;
+      const sectionwiseProjectEntries = getRequiredSectionwiseArray(data, ["project_entries", "projectEntries"], "project_entries");
+      const sectionwiseExperienceEntries = getRequiredSectionwiseArray(data, ["experience_entries", "experienceEntries"], "experience_entries");
+      const sectionEvidenceTexts = buildSectionEvidenceTexts(resumeText, sectionwiseProjectEntries, sectionwiseExperienceEntries);
 
       for (const section of sectionConfig) {
         const sectionBlock = extractSectionBlockFromAi(data, section.aiKeys);
-        const matchedTechs = extractSectionMatchedFromAi(sectionBlock, requiredLookup);
+        const matchedTechs = getVerifiedSectionMatches(sectionBlock, sectionEvidenceTexts[section.key], resumeText, requiredTechStacks);
         const probability = getSectionProbabilityFromFormula(matchedTechs.length, requiredCount);
 
         result[section.outputColumn] = matchedTechs.join(", ");
@@ -760,10 +1063,7 @@ export const processResumeForShortlisting = async (
       result["Overall Probability"] = overallProbability;
       result["Overall Remarks"] =
         safeStr(data.overall_remarks ?? data.overallRemarks) ||
-        `${requiredTechStacks.length} required tech stack(s); AI section-wise analysis completed.`;
-
-      const sectionwiseProjectEntries = getRequiredSectionwiseArray(data, ["project_entries", "projectEntries"], "project_entries");
-      const sectionwiseExperienceEntries = getRequiredSectionwiseArray(data, ["experience_entries", "experienceEntries"], "experience_entries");
+        `${requiredTechStacks.length} required tech stack(s); section-wise matching verified against extracted section text.`;
 
       Object.assign(result, classifyAndFormatProjectsFromAi(sectionwiseProjectEntries));
       applyLatestExperienceToResult(result, getLatestExperience(sectionwiseExperienceEntries));
