@@ -8,6 +8,8 @@ const DEFAULT_PORT = 4010;
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const SERVER_RETRY_DELAY_MS = 500;
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const UPDATE_STATUS_CHECK_VISIBILITY_DELAY_MS = 1200;
+const UPDATE_STATUS_AUTO_CLOSE_MS = 1800;
 
 let serverPort = DEFAULT_PORT;
 let mainWindow = null;
@@ -18,12 +20,366 @@ let autoUpdateInterval = null;
 let isUpdateCheckInFlight = false;
 let isUpdateDownloadInProgress = false;
 let hasPendingDownloadedUpdate = false;
+let updateStatusWindow = null;
+let updateStatusWindowPromise = null;
+let updateStatusPayload = null;
+let pendingUpdateStatusShowTimer = null;
+let pendingUpdateStatusCloseTimer = null;
 
 app.setName("AI Resume Analyzer");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const showErrorDialog = (title, details) => {
   dialog.showErrorBox(title, details);
+};
+
+const clearPendingUpdateStatusShowTimer = () => {
+  if (pendingUpdateStatusShowTimer) {
+    clearTimeout(pendingUpdateStatusShowTimer);
+    pendingUpdateStatusShowTimer = null;
+  }
+};
+
+const clearPendingUpdateStatusCloseTimer = () => {
+  if (pendingUpdateStatusCloseTimer) {
+    clearTimeout(pendingUpdateStatusCloseTimer);
+    pendingUpdateStatusCloseTimer = null;
+  }
+};
+
+const setMainWindowProgress = (value) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setProgressBar(value);
+};
+
+const formatBytes = (bytes) => {
+  const numeric = Number(bytes);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0 B";
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = numeric;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = unitIndex === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(decimals)} ${units[unitIndex]}`;
+};
+
+const createUpdateStatusHtml = () => `
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Updater</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", Arial, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(180deg, #f8fbff 0%, #eef5fb 100%);
+        color: #11203a;
+      }
+
+      .shell {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+
+      .card {
+        width: 100%;
+        max-width: 420px;
+        background: #ffffff;
+        border: 1px solid #d9e4ef;
+        border-radius: 18px;
+        box-shadow: 0 20px 45px rgba(17, 32, 58, 0.12);
+        padding: 24px 24px 20px;
+        box-sizing: border-box;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .indicator {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: #e9f2ff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+      }
+
+      .spinner {
+        width: 22px;
+        height: 22px;
+        border: 3px solid #c8d8ee;
+        border-top-color: #0b7a75;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      .ready-mark {
+        display: none;
+        font-size: 20px;
+        font-weight: 700;
+        color: #0b7a75;
+        line-height: 1;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .message {
+        margin: 6px 0 0;
+        font-size: 14px;
+        color: #41506b;
+        line-height: 1.45;
+      }
+
+      .detail {
+        margin: 16px 0 0;
+        font-size: 13px;
+        color: #5d6b84;
+        line-height: 1.45;
+        min-height: 18px;
+      }
+
+      .progress-shell {
+        margin-top: 18px;
+      }
+
+      .progress-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: baseline;
+        font-size: 13px;
+        color: #41506b;
+        margin-bottom: 8px;
+      }
+
+      .progress-bar {
+        height: 10px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: #e6edf5;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #0b7a75 0%, #1f9f8e 100%);
+        transition: width 0.18s ease;
+      }
+
+      .hint {
+        margin-top: 14px;
+        font-size: 12px;
+        color: #74839b;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card">
+        <div class="header">
+          <div class="indicator">
+            <div id="spinner" class="spinner"></div>
+            <div id="readyMark" class="ready-mark">OK</div>
+          </div>
+          <div>
+            <h1 id="title" class="title">Checking for updates</h1>
+            <p id="message" class="message">Looking for a newer desktop version.</p>
+          </div>
+        </div>
+
+        <p id="detail" class="detail"></p>
+
+        <div id="progressShell" class="progress-shell hidden">
+          <div class="progress-meta">
+            <span id="progressLabel">Downloading update...</span>
+            <strong id="progressPercent">0%</strong>
+          </div>
+          <div class="progress-bar">
+            <div id="progressFill" class="progress-fill"></div>
+          </div>
+        </div>
+
+        <div id="hint" class="hint">You can continue using the app while the update is prepared.</div>
+      </div>
+    </div>
+
+    <script>
+      window.renderUpdateStatus = function renderUpdateStatus(payload) {
+        const titleEl = document.getElementById("title");
+        const messageEl = document.getElementById("message");
+        const detailEl = document.getElementById("detail");
+        const progressShellEl = document.getElementById("progressShell");
+        const progressLabelEl = document.getElementById("progressLabel");
+        const progressPercentEl = document.getElementById("progressPercent");
+        const progressFillEl = document.getElementById("progressFill");
+        const hintEl = document.getElementById("hint");
+        const spinnerEl = document.getElementById("spinner");
+        const readyMarkEl = document.getElementById("readyMark");
+
+        const normalized = payload || {};
+        titleEl.textContent = normalized.title || "Updater";
+        messageEl.textContent = normalized.message || "";
+        detailEl.textContent = normalized.detail || "";
+        hintEl.textContent = normalized.hint || "";
+
+        const hasProgress = typeof normalized.progressPercent === "number";
+        progressShellEl.classList.toggle("hidden", !hasProgress);
+        progressLabelEl.textContent = normalized.progressLabel || "Downloading update...";
+        progressPercentEl.textContent = hasProgress ? normalized.progressPercent.toFixed(0) + "%" : "";
+        progressFillEl.style.width = hasProgress ? Math.max(0, Math.min(100, normalized.progressPercent)) + "%" : "0%";
+
+        const isReady = Boolean(normalized.isReady);
+        spinnerEl.style.display = isReady ? "none" : "block";
+        readyMarkEl.style.display = isReady ? "block" : "none";
+      };
+    </script>
+  </body>
+</html>
+`;
+
+const getSerializedPayloadScript = (payload) => {
+  const serialized = JSON.stringify(payload).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+  return `window.renderUpdateStatus(${serialized});`;
+};
+
+const renderUpdateStatusWindow = (payload) => {
+  if (!updateStatusWindow || updateStatusWindow.isDestroyed()) return;
+
+  const run = () => updateStatusWindow.webContents.executeJavaScript(getSerializedPayloadScript(payload)).catch(() => {});
+  if (updateStatusWindow.webContents.isLoading()) {
+    updateStatusWindow.webContents.once("did-finish-load", run);
+    return;
+  }
+
+  run();
+};
+
+const ensureUpdateStatusWindow = async () => {
+  if (updateStatusWindow && !updateStatusWindow.isDestroyed()) {
+    return updateStatusWindow;
+  }
+
+  if (updateStatusWindowPromise) {
+    return updateStatusWindowPromise;
+  }
+
+  updateStatusWindowPromise = (async () => {
+    const parentWindow = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+
+    updateStatusWindow = new BrowserWindow({
+      width: 460,
+      height: 250,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      show: false,
+      skipTaskbar: true,
+      autoHideMenuBar: true,
+      parent: parentWindow,
+      backgroundColor: "#eef5fb",
+      webPreferences: {
+        contextIsolation: true,
+        sandbox: true,
+      },
+    });
+
+    updateStatusWindow.on("closed", () => {
+      updateStatusWindow = null;
+    });
+
+    await updateStatusWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(createUpdateStatusHtml())}`);
+    return updateStatusWindow;
+  })().finally(() => {
+    updateStatusWindowPromise = null;
+  });
+
+  return updateStatusWindowPromise;
+};
+
+const showUpdateStatus = async (payload, options = {}) => {
+  updateStatusPayload = payload;
+  clearPendingUpdateStatusCloseTimer();
+
+  const windowInstance = await ensureUpdateStatusWindow();
+  if (!windowInstance || windowInstance.isDestroyed()) return;
+
+  renderUpdateStatusWindow(payload);
+
+  if (!windowInstance.isVisible()) {
+    windowInstance.show();
+  }
+
+  if (typeof options.autoCloseMs === "number" && options.autoCloseMs > 0) {
+    pendingUpdateStatusCloseTimer = setTimeout(() => {
+      if (updateStatusWindow && !updateStatusWindow.isDestroyed()) {
+        updateStatusWindow.close();
+      }
+      updateStatusPayload = null;
+      setMainWindowProgress(-1);
+      pendingUpdateStatusCloseTimer = null;
+    }, options.autoCloseMs);
+  }
+};
+
+const closeUpdateStatus = () => {
+  clearPendingUpdateStatusShowTimer();
+  clearPendingUpdateStatusCloseTimer();
+  updateStatusPayload = null;
+  setMainWindowProgress(-1);
+
+  if (updateStatusWindow && !updateStatusWindow.isDestroyed()) {
+    updateStatusWindow.close();
+  }
+};
+
+const scheduleCheckingForUpdatesStatus = () => {
+  clearPendingUpdateStatusShowTimer();
+  pendingUpdateStatusShowTimer = setTimeout(() => {
+    pendingUpdateStatusShowTimer = null;
+    setMainWindowProgress(2);
+    void showUpdateStatus({
+      title: "Checking for updates",
+      message: "Looking for a newer desktop version.",
+      detail: "If an update is available, the app will download it here.",
+      hint: "You can continue using the app while we check.",
+    });
+  }, UPDATE_STATUS_CHECK_VISIBILITY_DELAY_MS);
 };
 
 process.on("uncaughtException", (error) => {
@@ -236,33 +592,85 @@ const setupAutoUpdates = () => {
 
     autoUpdater.on("checking-for-update", () => {
       isUpdateCheckInFlight = true;
+      scheduleCheckingForUpdatesStatus();
     });
 
     autoUpdater.on("update-available", (info) => {
+      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = true;
+      setMainWindowProgress(0);
+      void showUpdateStatus({
+        title: "Downloading update",
+        message: `Version ${info?.version ?? "latest"} is being downloaded.`,
+        detail: "The update package is downloading now. Installation will happen after restart.",
+        hint: "You can continue using the app while the update downloads.",
+        progressLabel: "Downloading update...",
+        progressPercent: 0,
+      });
       console.info(`Auto-update available: ${info?.version ?? "unknown version"}`);
     });
 
     autoUpdater.on("update-not-available", () => {
+      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = false;
+      if (updateStatusPayload) {
+        void showUpdateStatus(
+          {
+            title: "App is up to date",
+            message: "You are already using the latest desktop version.",
+            detail: "",
+            hint: "",
+            isReady: true,
+          },
+          { autoCloseMs: UPDATE_STATUS_AUTO_CLOSE_MS },
+        );
+      } else {
+        setMainWindowProgress(-1);
+      }
     });
 
-    autoUpdater.on("download-progress", () => {
+    autoUpdater.on("download-progress", (progress) => {
       isUpdateDownloadInProgress = true;
+      const percent = Math.max(0, Math.min(100, Number(progress?.percent ?? 0)));
+      setMainWindowProgress(percent / 100);
+      void showUpdateStatus({
+        title: "Downloading update",
+        message: "A new desktop version is downloading.",
+        detail: `${formatBytes(progress?.transferred)} of ${formatBytes(progress?.total)} downloaded at ${formatBytes(progress?.bytesPerSecond)}/s`,
+        hint: "Installation will be ready after the download completes.",
+        progressLabel: "Downloading update...",
+        progressPercent: percent,
+      });
     });
 
     autoUpdater.on("error", (error) => {
+      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = false;
+      if (updateStatusPayload) {
+        void showUpdateStatus(
+          {
+            title: "Update check failed",
+            message: "The app could not finish checking for updates.",
+            detail: error instanceof Error ? error.message : String(error),
+            hint: "The app will try again later automatically.",
+          },
+          { autoCloseMs: 4000 },
+        );
+      } else {
+        setMainWindowProgress(-1);
+      }
       console.error("Auto-update error:", error instanceof Error ? error.message : String(error));
     });
 
     autoUpdater.on("update-downloaded", async (info) => {
+      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = false;
       hasPendingDownloadedUpdate = true;
+      closeUpdateStatus();
 
       const result = await dialog.showMessageBox(mainWindow ?? undefined, {
         type: "info",
@@ -324,4 +732,6 @@ app.on("before-quit", () => {
     clearInterval(autoUpdateInterval);
     autoUpdateInterval = null;
   }
+  clearPendingUpdateStatusShowTimer();
+  clearPendingUpdateStatusCloseTimer();
 });
