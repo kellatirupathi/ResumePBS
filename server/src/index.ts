@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
@@ -6,7 +7,7 @@ import { config, getProviderConcurrencyCap, getProviderConfig, getRecommendedCon
 import { ANALYSIS_TYPES, SHORTLISTING_MODES } from "./constants.js";
 import { createJob, getFilteredCsv, getJob, getJobResults, parseCsvRows, parsePastedRows, serializeJob } from "./jobs.js";
 import { fetchBigQueryDatasetSnapshot, fetchBigQueryTableSnapshot, fetchLearningMetricsByUserIds } from "./bigquery.js";
-import type { AnalysisType, FilterQuery, InputMethod, JobCreatePayload, Provider, ShortlistingMode } from "./types.js";
+import type { AnalysisType, DesktopUpdateStatus, FilterQuery, InputMethod, JobCreatePayload, Provider, ShortlistingMode } from "./types.js";
 import { isOcrAvailable } from "./extraction.js";
 
 const app = express();
@@ -77,12 +78,94 @@ const parseUserIds = (input: unknown): string[] => {
   return [];
 };
 
+const readDesktopUpdateStatus = (): DesktopUpdateStatus => {
+  const statusPath = String(process.env.DESKTOP_UPDATE_STATUS_PATH ?? "").trim();
+  const currentVersion = String(process.env.DESKTOP_APP_VERSION ?? "0.0.0").trim() || "0.0.0";
+
+  if (!statusPath) {
+    return {
+      isDesktopApp: false,
+      currentVersion,
+      phase: "unsupported",
+      message: "",
+    };
+  }
+
+  if (!fs.existsSync(statusPath)) {
+    return {
+      isDesktopApp: true,
+      currentVersion,
+      phase: "idle",
+      message: "",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statusPath, "utf8")) as Partial<DesktopUpdateStatus>;
+    return {
+      isDesktopApp: true,
+      currentVersion,
+      phase: parsed.phase ?? "idle",
+      availableVersion: parsed.availableVersion,
+      progressPercent: parsed.progressPercent,
+      message: parsed.message ?? "",
+      checkedAt: parsed.checkedAt,
+    };
+  } catch {
+    return {
+      isDesktopApp: true,
+      currentVersion,
+      phase: "error",
+      message: "Failed to load desktop update status.",
+    };
+  }
+};
+
+const writeDesktopUpdateCommand = (action: "installNow" | "checkNow", availableVersion?: string): boolean => {
+  const commandPath = String(process.env.DESKTOP_UPDATE_COMMAND_PATH ?? "").trim();
+  if (!commandPath) return false;
+
+  fs.writeFileSync(
+    commandPath,
+    JSON.stringify(
+      {
+        action,
+        availableVersion,
+        requestedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  return true;
+};
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
 app.get("/api/config", (_req, res) => {
   res.json(getProviderConfig(isOcrAvailable()));
+});
+
+app.get("/api/desktop/update-status", (_req, res) => {
+  res.json(readDesktopUpdateStatus());
+});
+
+app.post("/api/desktop/update-action", (req, res) => {
+  const action = String(req.body?.action ?? "").trim();
+  if (action !== "installNow" && action !== "checkNow") {
+    return res.status(400).json({ error: "action must be installNow or checkNow." });
+  }
+
+  const ok = writeDesktopUpdateCommand(action, String(req.body?.availableVersion ?? "").trim());
+  if (!ok) {
+    return res.status(400).json({ error: "Desktop update controls are unavailable in this environment." });
+  }
+
+  return res.json({ ok: true });
 });
 
 app.get("/api/bigquery", async (_req, res) => {

@@ -12,6 +12,18 @@ export interface ServerConfig {
   ocrAvailable: boolean;
 }
 
+export type DesktopUpdatePhase = "unsupported" | "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "error";
+
+export interface DesktopUpdateStatus {
+  isDesktopApp: boolean;
+  currentVersion: string;
+  phase: DesktopUpdatePhase;
+  availableVersion?: string;
+  progressPercent?: number;
+  message?: string;
+  checkedAt?: string;
+}
+
 export interface JobStatusResponse {
   id: string;
   status: "queued" | "running" | "completed" | "failed";

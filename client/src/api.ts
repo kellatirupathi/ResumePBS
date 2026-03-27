@@ -4,6 +4,7 @@ import type {
   BigQueryTableDataResponse,
   BigQueryLearningMetricsResponse,
   BigQueryDatasetSnapshot,
+  DesktopUpdateStatus,
   InputMethod,
   JobStatusResponse,
   Provider,
@@ -30,6 +31,19 @@ export interface StartJobPayload {
 
 export const getConfig = async (): Promise<ServerConfig> => {
   const { data } = await client.get<ServerConfig>("/api/config");
+  return data;
+};
+
+export const getDesktopUpdateStatus = async (): Promise<DesktopUpdateStatus> => {
+  const { data } = await client.get<DesktopUpdateStatus>("/api/desktop/update-status");
+  return data;
+};
+
+export const requestDesktopUpdateInstall = async (availableVersion?: string): Promise<{ ok: true }> => {
+  const { data } = await client.post<{ ok: true }>("/api/desktop/update-action", {
+    action: "installNow",
+    availableVersion,
+  });
   return data;
 };
 

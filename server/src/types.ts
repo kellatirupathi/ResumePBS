@@ -72,3 +72,15 @@ export interface ProviderConfig {
   hasGoogleServiceAccount: boolean;
   ocrAvailable: boolean;
 }
+
+export type DesktopUpdatePhase = "unsupported" | "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "error";
+
+export interface DesktopUpdateStatus {
+  isDesktopApp: boolean;
+  currentVersion: string;
+  phase: DesktopUpdatePhase;
+  availableVersion?: string;
+  progressPercent?: number;
+  message?: string;
+  checkedAt?: string;
+}

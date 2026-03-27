@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
 const { pathToFileURL } = require("node:url");
+const dotenv = require("dotenv");
 
 const DEFAULT_PORT = 4010;
 const SERVER_READY_TIMEOUT_MS = 60_000;
@@ -10,6 +11,7 @@ const SERVER_RETRY_DELAY_MS = 500;
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPDATE_STATUS_CHECK_VISIBILITY_DELAY_MS = 1200;
 const UPDATE_STATUS_AUTO_CLOSE_MS = 1800;
+const UPDATE_COMMAND_POLL_INTERVAL_MS = 1500;
 
 let serverPort = DEFAULT_PORT;
 let mainWindow = null;
@@ -26,12 +28,126 @@ let updateStatusPayload = null;
 let pendingUpdateStatusShowTimer = null;
 let pendingUpdateStatusCloseTimer = null;
 let hasDownloadHandlerAttached = false;
+let desktopUpdateStatusPath = "";
+let desktopUpdateCommandPath = "";
+let updateCommandInterval = null;
 
 app.setName("AI Resume Analyzer");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const showErrorDialog = (title, details) => {
   dialog.showErrorBox(title, details);
+};
+
+const MANAGED_ENV_KEYS = [
+  "PORT",
+  "VITE_API_BASE_URL",
+  "OPENAI_API_KEY",
+  "MISTRAL_API_KEY",
+  "GOOGLE_SERVICE_ACCOUNT_JSON",
+  "GOOGLE_SERVICE_ACCOUNT_PATH",
+  ...Array.from({ length: 12 }, (_, idx) => `OPENAI_API_KEY_${idx + 1}`),
+  ...Array.from({ length: 12 }, (_, idx) => `MISTRAL_API_KEY_${idx + 1}`),
+];
+
+const readEnvEntries = (envFilePath) => {
+  if (!envFilePath || !fs.existsSync(envFilePath)) {
+    return {};
+  }
+
+  try {
+    return dotenv.parse(fs.readFileSync(envFilePath, "utf8"));
+  } catch {
+    return {};
+  }
+};
+
+const getBundledEnvPath = () => {
+  const templateCandidates = [
+    path.join(app.getAppPath(), ".env"),
+    path.join(process.resourcesPath, ".env"),
+    path.join(app.getAppPath(), ".env.example"),
+    path.join(process.resourcesPath, ".env.example"),
+  ];
+
+  return templateCandidates.find((candidate) => fs.existsSync(candidate)) || "";
+};
+
+const shouldRefreshUserEnvFromTemplate = (userEnvPath, templatePath) => {
+  if (!userEnvPath || !templatePath || !fs.existsSync(userEnvPath) || !fs.existsSync(templatePath)) {
+    return false;
+  }
+
+  const userEntries = readEnvEntries(userEnvPath);
+  const templateEntries = readEnvEntries(templatePath);
+
+  return MANAGED_ENV_KEYS.some((key) => {
+    const templateValue = String(templateEntries[key] ?? "").trim();
+    const userValue = String(userEntries[key] ?? "").trim();
+    return Boolean(templateValue) && !userValue;
+  });
+};
+
+const writeDesktopUpdateStatus = (status) => {
+  if (!desktopUpdateStatusPath) return;
+
+  const payload = {
+    isDesktopApp: true,
+    currentVersion: app.getVersion(),
+    checkedAt: new Date().toISOString(),
+    ...status,
+  };
+
+  fs.writeFileSync(desktopUpdateStatusPath, JSON.stringify(payload, null, 2), "utf8");
+};
+
+const consumeDesktopUpdateCommand = async () => {
+  if (!desktopUpdateCommandPath || !fs.existsSync(desktopUpdateCommandPath)) return;
+
+  let command = null;
+  try {
+    command = JSON.parse(fs.readFileSync(desktopUpdateCommandPath, "utf8"));
+  } catch {
+    command = null;
+  } finally {
+    try {
+      fs.unlinkSync(desktopUpdateCommandPath);
+    } catch {}
+  }
+
+  if (!command || typeof command.action !== "string") return;
+
+  if (command.action === "installNow" && autoUpdaterInstance && hasPendingDownloadedUpdate) {
+    writeDesktopUpdateStatus({
+      phase: "installing",
+      availableVersion: command.availableVersion || app.getVersion(),
+      message: "Restarting to apply the downloaded update.",
+    });
+    setImmediate(() => autoUpdaterInstance.quitAndInstall(false, true));
+    return;
+  }
+
+  if (command.action === "checkNow" && autoUpdaterInstance && !isUpdateCheckInFlight && !isUpdateDownloadInProgress) {
+    isUpdateCheckInFlight = true;
+    try {
+      await autoUpdaterInstance.checkForUpdates();
+    } catch (error) {
+      isUpdateCheckInFlight = false;
+      console.error("Manual update check failed:", error instanceof Error ? error.message : String(error));
+    }
+  }
+};
+
+const scheduleDesktopUpdateCommandPolling = () => {
+  if (updateCommandInterval || !desktopUpdateCommandPath) return;
+
+  updateCommandInterval = setInterval(() => {
+    void consumeDesktopUpdateCommand().catch((error) => {
+      console.error("Failed to process desktop update command:", error instanceof Error ? error.message : String(error));
+    });
+  }, UPDATE_COMMAND_POLL_INTERVAL_MS);
+
+  updateCommandInterval.unref?.();
 };
 
 const clearPendingUpdateStatusShowTimer = () => {
@@ -442,18 +558,15 @@ const readPortFromEnvFile = (envFilePath) => {
 
 const ensureUserEnvFile = () => {
   const userDataEnvPath = path.join(app.getPath("userData"), ".env");
+  const templatePath = getBundledEnvPath();
+
   if (fs.existsSync(userDataEnvPath)) {
+    if (templatePath && shouldRefreshUserEnvFromTemplate(userDataEnvPath, templatePath)) {
+      fs.copyFileSync(templatePath, userDataEnvPath);
+    }
     return userDataEnvPath;
   }
 
-  const templateCandidates = [
-    path.join(app.getAppPath(), ".env"),
-    path.join(process.resourcesPath, ".env"),
-    path.join(app.getAppPath(), ".env.example"),
-    path.join(process.resourcesPath, ".env.example"),
-  ];
-
-  const templatePath = templateCandidates.find((candidate) => fs.existsSync(candidate));
   if (templatePath) {
     fs.copyFileSync(templatePath, userDataEnvPath);
     return userDataEnvPath;
@@ -476,6 +589,12 @@ const ensureUserEnvFile = () => {
 const configureRuntimeEnvironment = () => {
   const envFilePath = ensureUserEnvFile();
   process.env.APP_ENV_PATH = envFilePath;
+  desktopUpdateStatusPath = path.join(app.getPath("userData"), "desktop-update-status.json");
+  desktopUpdateCommandPath = path.join(app.getPath("userData"), "desktop-update-command.json");
+  process.env.DESKTOP_UPDATE_STATUS_PATH = desktopUpdateStatusPath;
+  process.env.DESKTOP_UPDATE_COMMAND_PATH = desktopUpdateCommandPath;
+  process.env.DESKTOP_APP_VERSION = app.getVersion();
+  writeDesktopUpdateStatus({ phase: "idle", message: "" });
   serverPort = readPortFromEnvFile(envFilePath) ?? DEFAULT_PORT;
 };
 
@@ -623,102 +742,69 @@ const setupAutoUpdates = () => {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.fullChangelog = true;
+    scheduleDesktopUpdateCommandPolling();
 
     autoUpdater.on("checking-for-update", () => {
       isUpdateCheckInFlight = true;
-      scheduleCheckingForUpdatesStatus();
+      writeDesktopUpdateStatus({
+        phase: "checking",
+        message: "Checking for updates.",
+      });
     });
 
     autoUpdater.on("update-available", (info) => {
-      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = true;
-      setMainWindowProgress(0);
-      void showUpdateStatus({
-        title: "Downloading update",
-        message: `Version ${info?.version ?? "latest"} is being downloaded.`,
-        detail: "The update package is downloading now. Installation will happen after restart.",
-        hint: "You can continue using the app while the update downloads.",
-        progressLabel: "Downloading update...",
+      writeDesktopUpdateStatus({
+        phase: "available",
+        availableVersion: info?.version ?? "",
         progressPercent: 0,
+        message: `Version ${info?.version ?? "latest"} is downloading in the background.`,
       });
       console.info(`Auto-update available: ${info?.version ?? "unknown version"}`);
     });
 
     autoUpdater.on("update-not-available", () => {
-      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = false;
-      if (updateStatusPayload) {
-        void showUpdateStatus(
-          {
-            title: "App is up to date",
-            message: "You are already using the latest desktop version.",
-            detail: "",
-            hint: "",
-            isReady: true,
-          },
-          { autoCloseMs: UPDATE_STATUS_AUTO_CLOSE_MS },
-        );
-      } else {
-        setMainWindowProgress(-1);
-      }
+      hasPendingDownloadedUpdate = false;
+      writeDesktopUpdateStatus({
+        phase: "idle",
+        message: "",
+      });
     });
 
     autoUpdater.on("download-progress", (progress) => {
       isUpdateDownloadInProgress = true;
       const percent = Math.max(0, Math.min(100, Number(progress?.percent ?? 0)));
-      setMainWindowProgress(percent / 100);
-      void showUpdateStatus({
-        title: "Downloading update",
-        message: "A new desktop version is downloading.",
-        detail: `${formatBytes(progress?.transferred)} of ${formatBytes(progress?.total)} downloaded at ${formatBytes(progress?.bytesPerSecond)}/s`,
-        hint: "Installation will be ready after the download completes.",
-        progressLabel: "Downloading update...",
+      writeDesktopUpdateStatus({
+        phase: "downloading",
+        availableVersion: progress?.version ?? "",
+        message: `${formatBytes(progress?.transferred)} of ${formatBytes(progress?.total)} downloaded at ${formatBytes(progress?.bytesPerSecond)}/s`,
         progressPercent: percent,
       });
     });
 
     autoUpdater.on("error", (error) => {
-      clearPendingUpdateStatusShowTimer();
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = false;
-      if (updateStatusPayload) {
-        void showUpdateStatus(
-          {
-            title: "Update check failed",
-            message: "The app could not finish checking for updates.",
-            detail: error instanceof Error ? error.message : String(error),
-            hint: "The app will try again later automatically.",
-          },
-          { autoCloseMs: 4000 },
-        );
-      } else {
-        setMainWindowProgress(-1);
-      }
+      writeDesktopUpdateStatus({
+        phase: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
       console.error("Auto-update error:", error instanceof Error ? error.message : String(error));
     });
 
-    autoUpdater.on("update-downloaded", async (info) => {
-      clearPendingUpdateStatusShowTimer();
+    autoUpdater.on("update-downloaded", (info) => {
       isUpdateCheckInFlight = false;
       isUpdateDownloadInProgress = false;
       hasPendingDownloadedUpdate = true;
-      closeUpdateStatus();
-
-      const result = await dialog.showMessageBox(mainWindow ?? undefined, {
-        type: "info",
-        buttons: ["Restart now", "Later"],
-        defaultId: 0,
-        cancelId: 1,
-        title: "Update Ready",
-        message: `Version ${info?.version ?? "latest"} has been downloaded.`,
-        detail: "Restart the app now to apply the update.",
+      writeDesktopUpdateStatus({
+        phase: "downloaded",
+        availableVersion: info?.version ?? "",
+        progressPercent: 100,
+        message: `Version ${info?.version ?? "latest"} is ready to install.`,
       });
-
-      if (result.response === 0) {
-        setImmediate(() => autoUpdater.quitAndInstall(false, true));
-      }
     });
 
     scheduleAutoUpdateChecks();
@@ -726,9 +812,17 @@ const setupAutoUpdates = () => {
     isUpdateCheckInFlight = true;
     void autoUpdater.checkForUpdates().catch((error) => {
       isUpdateCheckInFlight = false;
+      writeDesktopUpdateStatus({
+        phase: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
       console.error("Initial auto-update check failed:", error instanceof Error ? error.message : String(error));
     });
   } catch (error) {
+    writeDesktopUpdateStatus({
+      phase: "error",
+      message: error instanceof Error ? error.message : String(error),
+    });
     console.error("Auto-update setup failed:", error);
   }
 };
@@ -765,6 +859,10 @@ app.on("before-quit", () => {
   if (autoUpdateInterval) {
     clearInterval(autoUpdateInterval);
     autoUpdateInterval = null;
+  }
+  if (updateCommandInterval) {
+    clearInterval(updateCommandInterval);
+    updateCommandInterval = null;
   }
   clearPendingUpdateStatusShowTimer();
   clearPendingUpdateStatusCloseTimer();

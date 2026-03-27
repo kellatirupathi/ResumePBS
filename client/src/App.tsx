@@ -28,9 +28,9 @@ import {
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
 import axios from "axios";
-import { buildDownloadUrl, getConfig, getJobStatus, startJob, type StartJobPayload } from "./api";
+import { buildDownloadUrl, getConfig, getDesktopUpdateStatus, getJobStatus, requestDesktopUpdateInstall, startJob, type StartJobPayload } from "./api";
 import { applyFilters, defaultFilters, priorityOrder, sortAndOrderRows, toQueryParamsFromFilters, type TableRow } from "./helpers";
-import type { AnalysisType, FilterState, InputMethod, JobStatusResponse, Provider, ServerConfig, ShortlistingMode } from "./types";
+import type { AnalysisType, DesktopUpdateStatus, FilterState, InputMethod, JobStatusResponse, Provider, ServerConfig, ShortlistingMode } from "./types";
 
 const drawerWidth = 320;
 const rightPanelScale = 0.9;
@@ -215,6 +215,8 @@ const extractErrorMessage = (error: unknown): string => {
 
 const App = () => {
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [desktopUpdateStatus, setDesktopUpdateStatus] = useState<DesktopUpdateStatus | null>(null);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [provider, setProvider] = useState<Provider>("OpenAI");
   const [concurrency, setConcurrency] = useState<number>(12);
   const [enableOcr, setEnableOcr] = useState<boolean>(true);
@@ -273,6 +275,33 @@ const App = () => {
         setError(`Failed to load server configuration: ${loadError instanceof Error ? loadError.message : String(loadError)}`);
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadDesktopUpdateStatus = async () => {
+      try {
+        const status = await getDesktopUpdateStatus();
+        if (isMounted) {
+          setDesktopUpdateStatus(status);
+        }
+      } catch {
+        if (isMounted) {
+          setDesktopUpdateStatus(null);
+        }
+      }
+    };
+
+    void loadDesktopUpdateStatus();
+    const intervalId = window.setInterval(() => {
+      void loadDesktopUpdateStatus();
+    }, 5000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   useEffect(() => {
@@ -781,6 +810,36 @@ const App = () => {
     await downloadCsvFile(url, job?.fileName ?? "results.csv");
   };
 
+  const handleInstallDesktopUpdate = async () => {
+    if (!desktopUpdateStatus?.availableVersion || isInstallingUpdate) return;
+
+    setIsInstallingUpdate(true);
+    setDesktopUpdateStatus((current) =>
+      current
+        ? {
+            ...current,
+            phase: "installing",
+            message: `Restarting to install version ${current.availableVersion}.`,
+          }
+        : current,
+    );
+
+    try {
+      await requestDesktopUpdateInstall(desktopUpdateStatus.availableVersion);
+    } catch (installError) {
+      setIsInstallingUpdate(false);
+      setDesktopUpdateStatus((current) =>
+        current
+          ? {
+              ...current,
+              phase: "downloaded",
+              message: extractErrorMessage(installError),
+            }
+          : current,
+      );
+    }
+  };
+
   const singleCanStart =
     Boolean(companyName.trim()) &&
     !providerMissingKey &&
@@ -817,6 +876,36 @@ const App = () => {
 
     return null;
   }, [batchRunState, multiCompanies, workflowMode]);
+
+  const shouldShowDesktopUpdateCard = useMemo(() => {
+    if (!desktopUpdateStatus?.isDesktopApp) return false;
+    return ["available", "downloading", "downloaded", "installing"].includes(desktopUpdateStatus.phase);
+  }, [desktopUpdateStatus]);
+
+  const desktopUpdateButtonLabel = useMemo(() => {
+    if (!desktopUpdateStatus) return "";
+    if (desktopUpdateStatus.phase === "downloaded") return "Update App";
+    if (desktopUpdateStatus.phase === "installing") return "Restarting...";
+    if (desktopUpdateStatus.phase === "downloading") {
+      const percent = Math.round(Number(desktopUpdateStatus.progressPercent ?? 0));
+      return percent > 0 ? `Downloading ${percent}%` : "Downloading Update...";
+    }
+    return "Preparing Update...";
+  }, [desktopUpdateStatus]);
+
+  const desktopUpdateMessage = useMemo(() => {
+    if (!desktopUpdateStatus) return "";
+    if (desktopUpdateStatus.phase === "downloaded") {
+      return `Version ${desktopUpdateStatus.availableVersion ?? "latest"} is ready to install.`;
+    }
+    if (desktopUpdateStatus.phase === "downloading" || desktopUpdateStatus.phase === "available") {
+      return `Version ${desktopUpdateStatus.availableVersion ?? "latest"} is downloading in the background.`;
+    }
+    if (desktopUpdateStatus.phase === "installing") {
+      return `Applying version ${desktopUpdateStatus.availableVersion ?? "latest"} now.`;
+    }
+    return desktopUpdateStatus.message ?? "";
+  }, [desktopUpdateStatus]);
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "#f4f5f7" }}>
@@ -890,6 +979,27 @@ const App = () => {
 
           {serverConfig && !serverConfig.ocrAvailable && enableOcr ? (
             <Alert severity="warning">OCR dependency for PDF page rendering is unavailable. OCR fallback is best-effort.</Alert>
+          ) : null}
+
+          {shouldShowDesktopUpdateCard ? (
+            <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "rgba(15, 23, 42, 0.35)", border: "1px solid rgba(56, 189, 248, 0.28)" }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.75, color: "#bae6fd" }}>
+                App Update
+              </Typography>
+              <Typography variant="body2" sx={{ mb: 1.25, color: "#e2e8f0", lineHeight: 1.5 }}>
+                {desktopUpdateMessage}
+              </Typography>
+              <Button
+                variant="contained"
+                fullWidth
+                onClick={() => {
+                  void handleInstallDesktopUpdate();
+                }}
+                disabled={desktopUpdateStatus?.phase !== "downloaded" || isInstallingUpdate}
+              >
+                {desktopUpdateButtonLabel}
+              </Button>
+            </Box>
           ) : null}
 
           <Box sx={{ pt: 1, borderTop: "1px solid rgba(148, 163, 184, 0.25)" }}>
