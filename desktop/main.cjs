@@ -49,6 +49,7 @@ const MANAGED_ENV_KEYS = [
   ...Array.from({ length: 12 }, (_, idx) => `OPENAI_API_KEY_${idx + 1}`),
   ...Array.from({ length: 12 }, (_, idx) => `MISTRAL_API_KEY_${idx + 1}`),
 ];
+const AI_ENV_KEYS = MANAGED_ENV_KEYS.filter((key) => key.startsWith("OPENAI_API_KEY") || key.startsWith("MISTRAL_API_KEY"));
 
 const readEnvEntries = (envFilePath) => {
   if (!envFilePath || !fs.existsSync(envFilePath)) {
@@ -86,6 +87,24 @@ const shouldRefreshUserEnvFromTemplate = (userEnvPath, templatePath) => {
     const userValue = String(userEntries[key] ?? "").trim();
     return Boolean(templateValue) && !userValue;
   });
+};
+
+const hasConfiguredAiKeys = (entries) =>
+  AI_ENV_KEYS.some((key) => {
+    const value = String(entries[key] ?? "").trim();
+    return Boolean(value);
+  });
+
+const syncEnvFile = (sourcePath, targetPath) => {
+  if (!sourcePath || !targetPath || !fs.existsSync(sourcePath)) return false;
+
+  try {
+    fs.copyFileSync(sourcePath, targetPath);
+    return true;
+  } catch (error) {
+    console.error("Failed to sync env file:", error instanceof Error ? error.message : String(error));
+    return false;
+  }
 };
 
 const writeDesktopUpdateStatus = (status) => {
@@ -559,17 +578,24 @@ const readPortFromEnvFile = (envFilePath) => {
 const ensureUserEnvFile = () => {
   const userDataEnvPath = path.join(app.getPath("userData"), ".env");
   const templatePath = getBundledEnvPath();
+  const templateEntries = readEnvEntries(templatePath);
+  const bundledHasAiKeys = hasConfiguredAiKeys(templateEntries);
+
+  if (templatePath && bundledHasAiKeys) {
+    syncEnvFile(templatePath, userDataEnvPath);
+    return templatePath;
+  }
 
   if (fs.existsSync(userDataEnvPath)) {
     if (templatePath && shouldRefreshUserEnvFromTemplate(userDataEnvPath, templatePath)) {
-      fs.copyFileSync(templatePath, userDataEnvPath);
+      syncEnvFile(templatePath, userDataEnvPath);
     }
     return userDataEnvPath;
   }
 
   if (templatePath) {
-    fs.copyFileSync(templatePath, userDataEnvPath);
-    return userDataEnvPath;
+    syncEnvFile(templatePath, userDataEnvPath);
+    return templatePath;
   }
 
   const fallbackContent = [
@@ -588,12 +614,23 @@ const ensureUserEnvFile = () => {
 
 const configureRuntimeEnvironment = () => {
   const envFilePath = ensureUserEnvFile();
+  const selectedEntries = readEnvEntries(envFilePath);
+
+  MANAGED_ENV_KEYS.forEach((key) => {
+    const value = String(selectedEntries[key] ?? "").trim();
+    if (value) {
+      process.env[key] = value;
+    }
+  });
+
   process.env.APP_ENV_PATH = envFilePath;
   desktopUpdateStatusPath = path.join(app.getPath("userData"), "desktop-update-status.json");
   desktopUpdateCommandPath = path.join(app.getPath("userData"), "desktop-update-command.json");
   process.env.DESKTOP_UPDATE_STATUS_PATH = desktopUpdateStatusPath;
   process.env.DESKTOP_UPDATE_COMMAND_PATH = desktopUpdateCommandPath;
   process.env.DESKTOP_APP_VERSION = app.getVersion();
+  console.info(`Desktop runtime env source: ${envFilePath}`);
+  console.info(`Desktop runtime loaded OpenAI keys: ${AI_ENV_KEYS.filter((key) => key.startsWith("OPENAI_API_KEY") && selectedEntries[key]).length}`);
   writeDesktopUpdateStatus({ phase: "idle", message: "" });
   serverPort = readPortFromEnvFile(envFilePath) ?? DEFAULT_PORT;
 };
