@@ -111,15 +111,46 @@ const toPercentLabel = (value: number): string => {
 type SectionwiseKey = "skills" | "projects" | "experience" | "certifications" | "education" | "summary";
 
 const sectionHeadingAliases: Record<SectionwiseKey, string[]> = {
-  skills: ["skills", "technical skills", "skill set", "core competencies", "technologies", "technical proficiencies"],
-  projects: ["projects", "project", "project experience", "academic projects", "personal projects", "relevant projects"],
-  experience: ["experience", "work experience", "professional experience", "employment history", "internship", "internships"],
-  certifications: ["certifications", "certification", "certificates", "courses", "trainings"],
-  education: ["education", "academics", "academic details", "qualifications", "educational qualifications"],
-  summary: ["summary", "professional summary", "profile summary", "profile", "objective", "career objective", "overview"],
+  skills: [
+    "skills", "technical skills", "skill set", "core competencies", "technologies", "technical proficiencies",
+    "key skills", "tech stack", "technology stack", "tools & technologies", "tools and technologies",
+    "programming languages", "languages & tools", "languages and tools", "languages & frameworks",
+    "languages and frameworks", "technical expertise", "areas of expertise", "technical competencies",
+    "frameworks & libraries", "frameworks and libraries", "software skills", "it skills", "computer skills",
+    "competencies", "tools",
+  ],
+  projects: [
+    "projects", "project", "project experience", "academic projects", "personal projects", "relevant projects",
+    "portfolio", "key projects", "notable projects", "side projects", "project work", "project highlights",
+    "featured projects", "major projects", "capstone projects", "college projects", "open source projects",
+  ],
+  experience: [
+    "experience", "work experience", "professional experience", "employment history", "internship", "internships",
+    "work history", "career history", "professional background", "industry experience", "job experience",
+    "employment", "positions held", "relevant experience", "practical experience", "job history",
+    "internship experience",
+  ],
+  certifications: [
+    "certifications", "certification", "certificates", "courses", "trainings",
+    "training", "professional certifications", "licenses & certifications", "licenses and certifications",
+    "credentials", "online courses", "professional development", "workshops",
+    "achievements & certifications", "achievements and certifications",
+  ],
+  education: [
+    "education", "academics", "academic details", "qualifications", "educational qualifications",
+    "educational background", "academic background", "academic history", "schooling", "degrees",
+  ],
+  summary: [
+    "summary", "professional summary", "profile summary", "profile", "objective", "career objective", "overview",
+    "about me", "about", "introduction", "bio", "executive summary", "professional profile",
+    "career summary", "personal statement",
+  ],
 };
 
-const headingSuffixes = new Set(["section", "details", "detail", "history", "profile", "information", "info"]);
+const headingSuffixes = new Set([
+  "section", "details", "detail", "history", "profile", "information", "info",
+  "background", "summary", "overview", "experience", "highlights",
+]);
 
 const toStringArray = (value: unknown): string[] => {
   if (Array.isArray(value)) {
@@ -391,6 +422,97 @@ const buildSectionEvidenceTexts = (
   };
 };
 
+const getAiMatchedTechsForSection = (sectionBlock: unknown): Set<string> => {
+  if (!sectionBlock || typeof sectionBlock !== "object" || Array.isArray(sectionBlock)) {
+    return new Set();
+  }
+  const obj = sectionBlock as Record<string, unknown>;
+  const raw = toStringArray(
+    obj.matched_techstacks ?? obj.matchedTechstacks ?? obj.matched ?? obj.technologies ?? obj.techStacks ?? obj.tech_stack ?? obj.skills ?? [],
+  );
+  return new Set(raw.map(toCompactToken).filter(Boolean));
+};
+
+/** Extracts per-tech evidence quotes from the AI section response.
+ *  Returns a Map of compactToken(techName) → list of evidence quote strings. */
+const collectPerTechEvidenceQuotes = (sectionBlock: unknown): Map<string, string[]> => {
+  const perTech = new Map<string, string[]>();
+  if (!sectionBlock || typeof sectionBlock !== "object" || Array.isArray(sectionBlock)) {
+    return perTech;
+  }
+
+  const sectionObj = sectionBlock as Record<string, unknown>;
+  const rawEvidence = [
+    sectionObj.evidence,
+    sectionObj.evidence_quotes,
+    sectionObj.evidenceQuotes,
+    sectionObj.quotes,
+  ];
+
+  for (const candidate of rawEvidence) {
+    if (!Array.isArray(candidate)) continue;
+    for (const item of candidate) {
+      if (!item || typeof item !== "object") continue;
+      const rec = item as Record<string, unknown>;
+      const techName = toCompactToken(safeStr(rec.techstack ?? rec.tech ?? rec.technology ?? rec.techStack));
+      const quote = safeStr(rec.quote ?? rec.text ?? rec.evidence ?? rec.snippet).trim();
+      if (!techName || !quote) continue;
+      if (!perTech.has(techName)) perTech.set(techName, []);
+      perTech.get(techName)!.push(quote);
+    }
+  }
+
+  return perTech;
+};
+
+/** Maps umbrella/parent tech names to known child keywords that count as valid evidence.
+ *  Used by Level 2 so that an evidence quote like "Jest" validates the umbrella tech "Testing". */
+const umbrellaEvidenceKeywords: Record<string, string[]> = {
+  testing: [
+    "jest", "selenium", "junit", "cypress", "mocha", "chai", "jasmine", "pytest", "playwright",
+    "karma", "appium", "testng", "postman", "unittest", "rspec", "enzyme", "vitest", "supertest",
+    "test", "testing", "tdd", "bdd", "qa",
+  ],
+  aws: [
+    "aws", "amazon", "ec2", "s3", "lambda", "rds", "dynamodb", "cloudfront", "sqs", "sns",
+    "ecs", "eks", "redshift", "glue", "athena", "cloudwatch", "iam", "elastic", "beanstalk",
+    "amplify", "cognito", "route53", "cloudformation", "fargate", "sagemaker",
+  ],
+  gcp: [
+    "gcp", "google cloud", "bigquery", "firebase", "cloud run", "cloud functions",
+    "compute engine", "app engine", "dataflow", "pub/sub",
+  ],
+  azure: [
+    "azure", "microsoft azure", "cosmos", "blob", "devops",
+  ],
+  sql: [
+    "sql", "sqlite", "mysql", "postgresql", "postgres", "mssql", "mariadb", "oracle",
+    "plsql", "tsql", "sqlserver", "database", "rdbms",
+  ],
+  aiml: [
+    "ai", "ml", "artificial", "intelligence", "machine", "learning", "deep", "neural",
+    "tensorflow", "pytorch", "keras", "scikit", "sklearn", "nlp", "computer vision",
+    "llm", "generative", "transformer", "bert", "gpt", "openai",
+  ],
+  cloud: [
+    "cloud", "aws", "gcp", "azure", "heroku", "vercel", "netlify", "digitalocean",
+    "docker", "kubernetes", "k8s", "containerization", "microservices",
+  ],
+  devops: [
+    "devops", "docker", "kubernetes", "k8s", "jenkins", "ci/cd", "cicd", "github actions",
+    "gitlab", "terraform", "ansible", "helm", "grafana", "prometheus", "nginx",
+  ],
+};
+
+/** Builds the list of keywords to check in evidence quotes for a given tech.
+ *  Includes: the compact token itself, words from the tech name, and umbrella child keywords. */
+const buildEvidenceKeywords = (tech: string): string[] => {
+  const techCompact = toCompactToken(tech);
+  const techWords = safeStr(tech).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 2);
+  const umbrella = umbrellaEvidenceKeywords[techCompact] ?? [];
+  return [...new Set([techCompact, ...techWords, ...umbrella])];
+};
+
 const getVerifiedSectionMatches = (
   sectionBlock: unknown,
   sectionEvidenceText: string,
@@ -399,17 +521,46 @@ const getVerifiedSectionMatches = (
 ): string[] => {
   const verified: string[] = [];
   const evidenceQuotes = collectEvidenceQuotesForSection(sectionBlock);
+  const hasSectionText = sectionEvidenceText.trim().length > 0;
+
+  // What the AI explicitly listed as matched in this section
+  const aiMatchedCompact = getAiMatchedTechsForSection(sectionBlock);
+
+  // Per-tech evidence: maps each tech to its specific evidence quotes from AI
+  const perTechEvidence = collectPerTechEvidenceQuotes(sectionBlock);
 
   for (const tech of requiredTechStacks) {
+    // Level 1 — direct text match in extracted section text (code-side safety net)
     if (matchesExplicitTechInText(sectionEvidenceText, tech)) {
       verified.push(tech);
       continue;
     }
 
+    // Level 2 — Trust AI: AI explicitly listed this tech in matched_techstacks
+    // AND the evidence quote AI provided FOR THIS SPECIFIC TECH:
+    //   a) exists in the actual resume text (not hallucinated), AND
+    //   b) quote is relevant — contains the tech name, a word from it, or a known child keyword
+    //      (e.g. "Jest" is valid evidence for "Testing", "S3" is valid evidence for "AWS")
+    const techCompact = toCompactToken(tech);
+    if (aiMatchedCompact.has(techCompact)) {
+      const techSpecificQuotes = perTechEvidence.get(techCompact) ?? [];
+      const evidenceKeywords = buildEvidenceKeywords(tech);
+      const hasRealEvidenceForThisTech = techSpecificQuotes.some((q) => {
+        if (!quoteExistsInResume(resumeText, q)) return false;
+        const quoteCompact = toCompactToken(q);
+        return evidenceKeywords.some((kw) => quoteCompact.includes(kw));
+      });
+      if (hasRealEvidenceForThisTech) {
+        verified.push(tech);
+        continue;
+      }
+    }
+
+    // Level 3 — AI evidence quote verification (original fallback)
     const hasVerifiedQuote = evidenceQuotes.some(
       (quote) =>
         quoteExistsInResume(resumeText, quote) &&
-        (!sectionEvidenceText.trim() || quoteExistsInResume(sectionEvidenceText, quote)) &&
+        (!hasSectionText || quoteExistsInResume(sectionEvidenceText, quote)) &&
         matchesExplicitTechInText(quote, tech),
     );
 
@@ -534,30 +685,65 @@ ${context.userRequirements}
 Required Tech Stacks (canonical list):
 ${requiredTechStacks.join(", ")}
 
-Task:
-1) Analyze the resume text section-wise for:
-   - skills
-   - projects
-   - experience
-   - certifications
-   - education
-   - summary
-2) For each section, return:
-   - matched_techstacks: only from the canonical required tech stack list
-3) In the same response, extract actual project entries into project_entries.
-4) In the same response, extract actual work experience / internship entries into experience_entries.
-5) Do not include tech stacks outside the required list in matched_techstacks.
-6) Keep Java and JavaScript strictly different.
-7) Resume formatting may be noisy/flattened; still infer the section context and map correctly.
-8) IMPORTANT: Match tech stacks to the correct section only, not global resume-wide mentions.
-9) IMPORTANT: Do not treat summary/profile/objective text, "experienced in" statements, skills, certifications, education, or projects as work experience.
-10) If the resume has no real work experience or internship entry, set experience_entries to [].
-11) project_entries must contain only actual projects from the resume.
-12) project_entries must ALWAYS be present as an array. Use [] when none exist.
-13) experience_entries must ALWAYS be present as an array. Use [] when none exist.
-14) Do NOT omit any top-level key from the required JSON.
-15) Never infer Angular from JavaScript/Bootstrap or Node JS from REST API/backend wording. Match only when the technology name or a common alias is explicitly present in that same section.
-16) For every matched tech stack, include exact evidence copied from that same section of the resume.
+════════════════════════════════════════════════════════
+SECTION DETECTION RULES
+════════════════════════════════════════════════════════
+The resume may use any heading style. You must intelligently map resume content to the 6 canonical sections below regardless of what heading the candidate used:
+
+- "skills"        → any heading like: Skills, Technical Skills, Key Skills, Core Competencies, Technologies, Tools & Technologies, Programming Languages, Tech Stack, Areas of Expertise, Frameworks, Competencies, Software Skills, IT Skills, Languages & Tools, etc.
+- "projects"      → any heading like: Projects, Personal Projects, Academic Projects, Portfolio, Key Projects, Notable Projects, Side Projects, Project Work, Capstone Projects, Open Source Projects, Project Highlights, etc.
+- "experience"    → any heading like: Experience, Work Experience, Professional Experience, Employment History, Internship, Work History, Career History, Industry Experience, Positions Held, Employment, Career, Professional Background, etc.
+- "certifications"→ any heading like: Certifications, Certificates, Courses, Training, Credentials, Licenses, Online Courses, Professional Development, Workshops, MOOCs, Achievements & Certifications, etc.
+- "education"     → any heading like: Education, Academics, Qualifications, Educational Background, Academic History, Degrees, Schooling, College, University, etc.
+- "summary"       → any heading like: Summary, Profile, Objective, Career Objective, About Me, About, Introduction, Bio, Overview, Professional Summary, Personal Statement, Highlights, Synopsis, etc.
+
+If the resume has no clear section headings, infer from context (e.g., a list of tools/languages belongs in "skills", project descriptions belong in "projects").
+
+════════════════════════════════════════════════════════
+VARIANT MATCHING RULES (CRITICAL)
+════════════════════════════════════════════════════════
+When the resume uses a variant, dialect, alias, or sub-technology of a required tech, treat it as a MATCH and use the EXACT canonical name from the required list in matched_techstacks.
+
+Examples of how to apply this:
+- Required "SQL"        → matches: SQLite, MySQL, PostgreSQL, Postgres, MSSQL, MariaDB, PL/SQL, T-SQL, Oracle DB, SQL Server, Oracle SQL
+- Required "React"      → matches: React.js, ReactJS, React JS, react.js
+- Required "Node"       → matches: Node.js, NodeJS, Node JS, node.js
+- Required "Vue"        → matches: Vue.js, VueJS, Vue JS
+- Required "Angular"    → matches: AngularJS, Angular.js, Angular JS
+- Required "Express"    → matches: Express.js, ExpressJS
+- Required "Next"       → matches: Next.js, NextJS, Next JS
+- Required "Nuxt"       → matches: Nuxt.js, NuxtJS
+- Required "Svelte"     → matches: Svelte.js, SvelteJS
+- Required "Python"     → matches: Python3, Python 3, Python 3.x, py
+- Required "HTML"       → matches: HTML5, html5
+- Required "CSS"        → matches: CSS3, css3
+- Required "AWS"        → matches: Amazon Web Services, Amazon S3, EC2, Lambda, AWS Lambda, AWS S3, RDS, DynamoDB, CloudFront
+- Required "GCP"        → matches: Google Cloud, Google Cloud Platform
+- Required "Azure"      → matches: Microsoft Azure
+- Required "SpringBoot" → matches: Spring Boot, Spring Framework, Spring MVC
+- Required ".NET"       → matches: ASP.NET, Dot Net, DotNet, asp.net
+- Required "MongoDB"    → matches: Mongo, mongo DB
+- Required "Testing"    → matches: Jest, Selenium, JUnit, Cypress, Mocha, Chai, Jasmine, PyTest, Playwright, Appium, TestNG, Karma, Postman (automated testing tools)
+- Required "AI/ML"      → matches: Artificial Intelligence, Machine Learning, AI, ML, Deep Learning
+- Required "JavaScript" → matches: JS, ECMAScript (but NEVER Java — Java and JavaScript are completely different)
+
+For ANY other tech: if the resume explicitly mentions a well-known alias, variant, or specific implementation of a required technology, treat it as a match and output the CANONICAL required name.
+
+════════════════════════════════════════════════════════
+STRICT RULES
+════════════════════════════════════════════════════════
+1)  JAVA IS NOT JAVASCRIPT. Never confuse them.
+2)  Only include techs in matched_techstacks that are from the canonical required list above.
+3)  Match tech stacks to the correct section only — not global resume-wide mentions.
+4)  Do NOT treat summary/profile/objective, "experienced in" statements, or education content as work experience.
+5)  Never infer Angular from Bootstrap/JavaScript, or Node from REST API/backend wording alone — the tech name or its alias must be explicitly present in that section.
+6)  For every matched tech, include the exact text from that section as evidence (copy verbatim from resume).
+7)  If the resume has no real work experience or internship, set experience_entries to [].
+8)  project_entries and experience_entries must ALWAYS be present as arrays (use [] when none).
+9)  Do NOT omit any top-level JSON key.
+10) Resume formatting may be noisy or flattened — still infer section context and map correctly.
+11) ANTI-HALLUCINATION: NEVER add a tech to matched_techstacks unless its name, alias, or variant is EXPLICITLY WRITTEN in that section of the resume. Do NOT infer technologies from context, project descriptions, or related technologies. If a section does not explicitly mention the tech or any known variant, do NOT include it. When in doubt, leave it OUT.
+12) Evidence quotes MUST be copied EXACTLY from the resume text — never paraphrase, summarize, or fabricate. If you cannot find exact text, set evidence to an empty array for that section.
 
 Project Classification Rules:
 ${projectClassificationBlock}
@@ -1009,7 +1195,14 @@ export const processResumeForShortlisting = async (
       if (requiredTechStacks.length === 0) {
         throw new Error("Could not parse required tech stacks from Step 2 input. Enter tech stacks as comma/newline separated values.");
       }
-      const prompt = buildSectionwisePrompt(context, requiredTechStacks, resumeText);
+
+      // Flag weak OCR text so AI knows to be conservative
+      const weakText = isWeakExtractedText(resumeText);
+      const resumeTextForPrompt = weakText
+        ? `[WARNING: The text below was extracted via OCR and may contain errors, garbled characters, or missing content. Be conservative — only match techs you are highly confident about.]\n\n${resumeText}`
+        : resumeText;
+
+      const prompt = buildSectionwisePrompt(context, requiredTechStacks, resumeTextForPrompt);
       const aiResponse = await analyzeTextWithProvider(prompt, context.provider, context.apiKey);
       const data = await parseAiJsonResponse(aiResponse, context.provider, context.apiKey);
 
@@ -1022,6 +1215,31 @@ export const processResumeForShortlisting = async (
       }
 
       validateSectionwisePayload(data);
+
+      // Second-pass hallucination cleanup: for each section, remove any tech from
+      // matched_techstacks whose evidence quotes are ALL fabricated (don't exist in resume).
+      for (const [, aliases] of Object.entries(sectionwiseSectionKeyAliases) as Array<[SectionwiseKey, string[]]>) {
+        const block = extractSectionBlockFromAi(data, aliases);
+        if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+        const sectionObj = block as Record<string, unknown>;
+        const matched = toStringArray(sectionObj.matched_techstacks ?? sectionObj.matchedTechstacks ?? sectionObj.matched ?? []);
+        if (!matched.length) continue;
+
+        const perTech = collectPerTechEvidenceQuotes(block);
+        const cleaned = matched.filter((techName) => {
+          const techCompact = toCompactToken(techName);
+          const quotes = perTech.get(techCompact) ?? [];
+          // Keep tech if it has no quotes (let verification handle it)
+          // or at least one quote exists in the actual resume text
+          if (quotes.length === 0) return true;
+          return quotes.some((q) => quoteExistsInResume(resumeText, q));
+        });
+
+        // Update the section data in-place
+        if (sectionObj.matched_techstacks !== undefined) sectionObj.matched_techstacks = cleaned;
+        else if (sectionObj.matchedTechstacks !== undefined) sectionObj.matchedTechstacks = cleaned;
+        else if (sectionObj.matched !== undefined) sectionObj.matched = cleaned;
+      }
 
       const sectionConfig: Array<{
         key: SectionwiseKey;
@@ -1061,9 +1279,12 @@ export const processResumeForShortlisting = async (
       const overallProbability =
         sectionScores.length > 0 ? roundToTwoDecimals(sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length) : 0;
       result["Overall Probability"] = overallProbability;
-      result["Overall Remarks"] =
+      const baseRemarks =
         safeStr(data.overall_remarks ?? data.overallRemarks) ||
         `${requiredTechStacks.length} required tech stack(s); section-wise matching verified against extracted section text.`;
+      result["Overall Remarks"] = weakText
+        ? `${baseRemarks} | WARNING: Resume text quality is low (OCR/scan) — results may be incomplete.`
+        : baseRemarks;
 
       Object.assign(result, classifyAndFormatProjectsFromAi(sectionwiseProjectEntries));
       applyLatestExperienceToResult(result, getLatestExperience(sectionwiseExperienceEntries));

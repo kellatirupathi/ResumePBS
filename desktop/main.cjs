@@ -25,6 +25,7 @@ let updateStatusWindowPromise = null;
 let updateStatusPayload = null;
 let pendingUpdateStatusShowTimer = null;
 let pendingUpdateStatusCloseTimer = null;
+let hasDownloadHandlerAttached = false;
 
 app.setName("AI Resume Analyzer");
 
@@ -67,6 +68,38 @@ const formatBytes = (bytes) => {
 
   const decimals = unitIndex === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
   return `${value.toFixed(decimals)} ${units[unitIndex]}`;
+};
+
+const resolveUniqueDownloadPath = (fileName) => {
+  const downloadsDir = app.getPath("downloads");
+  const parsed = path.parse(fileName || "results.csv");
+  const extension = parsed.ext || ".csv";
+  const baseName = parsed.name || "results";
+
+  let candidatePath = path.join(downloadsDir, `${baseName}${extension}`);
+  let suffix = 1;
+
+  while (fs.existsSync(candidatePath)) {
+    candidatePath = path.join(downloadsDir, `${baseName} (${suffix})${extension}`);
+    suffix += 1;
+  }
+
+  return candidatePath;
+};
+
+const attachAutoDownloadHandler = (windowInstance) => {
+  if (!windowInstance || hasDownloadHandlerAttached) return;
+
+  windowInstance.webContents.session.on("will-download", (_event, item) => {
+    try {
+      const savePath = resolveUniqueDownloadPath(item.getFilename());
+      item.setSavePath(savePath);
+    } catch (error) {
+      console.error("Failed to prepare download path:", error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  hasDownloadHandlerAttached = true;
 };
 
 const createUpdateStatusHtml = () => `
@@ -527,6 +560,7 @@ const createMainWindow = async () => {
   });
 
   mainWindow.setMenuBarVisibility(false);
+  attachAutoDownloadHandler(mainWindow);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);

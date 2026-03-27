@@ -22,8 +22,8 @@ interface RequestOptions {
 
 const DEFAULT_REQUEST_OPTIONS: RequestOptions = {
   systemPrompt: analysisSystemPrompt,
-  temperature: 0.1,
-  maxTokens: 6144,
+  temperature: 0,
+  maxTokens: 8192,
 };
 
 const REPAIR_REQUEST_OPTIONS: RequestOptions = {

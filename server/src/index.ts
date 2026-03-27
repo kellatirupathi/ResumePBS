@@ -202,6 +202,7 @@ app.post("/api/jobs", upload.single("csvFile"), (req, res) => {
     return res.status(202).json({
       jobId: job.id,
       totalRows: job.total,
+      message: `Started ${companyName} with ${job.total} resume(s).`,
     });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
