@@ -21,7 +21,9 @@
     "desktop:dev": "npm run desktop:prepare-env && npm run build && node desktop/run-electron.cjs",
     "desktop:dist": "npm run desktop:prepare-env && npm run build && electron-builder --win nsis",
     "desktop:publish": "npm run desktop:prepare-env && npm run build && electron-builder --win nsis --publish always",
-    "desktop:portable": "npm run desktop:prepare-env && npm run build && electron-builder --win portable"
+    "desktop:portable": "npm run desktop:prepare-env && npm run build && electron-builder --win portable",
+    "desktop:dist:mac": "npm run desktop:prepare-env && npm run build && electron-builder --mac dmg",
+    "desktop:publish:mac": "npm run desktop:prepare-env && npm run build && electron-builder --mac dmg --publish always"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.80",
@@ -83,6 +85,19 @@
           ]
         }
       ]
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.business",
+      "identity": null
     },
     "nsis": {
       "oneClick": false,

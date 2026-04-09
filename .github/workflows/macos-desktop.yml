@@ -1,0 +1,93 @@
+name: Build macOS Desktop App
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync package version with tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Validate required desktop secrets
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "Missing required GitHub Actions secret: OPENAI_API_KEY"
+            exit 1
+          fi
+
+      - name: Create bundled .env from repository secrets
+        shell: bash
+        run: |
+          cat > .env <<EOF
+          PORT=4010
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          MISTRAL_API_KEY=${{ secrets.MISTRAL_API_KEY }}
+          MISTRAL_API_KEY_1=${{ secrets.MISTRAL_API_KEY_1 }}
+          MISTRAL_API_KEY_2=${{ secrets.MISTRAL_API_KEY_2 }}
+          MISTRAL_API_KEY_3=${{ secrets.MISTRAL_API_KEY_3 }}
+          MISTRAL_API_KEY_4=${{ secrets.MISTRAL_API_KEY_4 }}
+          MISTRAL_API_KEY_5=${{ secrets.MISTRAL_API_KEY_5 }}
+          MISTRAL_API_KEY_6=${{ secrets.MISTRAL_API_KEY_6 }}
+          MISTRAL_API_KEY_7=${{ secrets.MISTRAL_API_KEY_7 }}
+          MISTRAL_API_KEY_8=${{ secrets.MISTRAL_API_KEY_8 }}
+          MISTRAL_API_KEY_9=${{ secrets.MISTRAL_API_KEY_9 }}
+          MISTRAL_API_KEY_10=${{ secrets.MISTRAL_API_KEY_10 }}
+          MISTRAL_API_KEY_11=${{ secrets.MISTRAL_API_KEY_11 }}
+          MISTRAL_API_KEY_12=${{ secrets.MISTRAL_API_KEY_12 }}
+          GOOGLE_SERVICE_ACCOUNT_JSON=${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SERVICE_ACCOUNT_PATH=
+          VITE_API_BASE_URL=http://localhost:4010
+          EOF
+
+      - name: Validate bundled desktop env
+        shell: bash
+        run: |
+          if ! grep -qE '^OPENAI_API_KEY=.+$' .env; then
+            echo "Bundled .env does not contain a usable OPENAI_API_KEY"
+            exit 1
+          fi
+
+      - name: Build and publish macOS app
+        if: startsWith(github.ref, 'refs/tags/')
+        run: npm run desktop:publish:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build macOS app
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: npm run desktop:dist:mac
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-desktop-installer
+          path: |
+            release/*.dmg
+            release/latest-mac.yml
+            release/*.blockmap
